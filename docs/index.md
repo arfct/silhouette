@@ -21,4 +21,4 @@ Requires macOS 14 or later and a physical green or blue backdrop.
 - [Terms of use](terms/)
 - [Source code](https://github.com/arfct/silhouette)
 
-© 2026 Artifact Creative Foundation
+© 2026 Artifact
