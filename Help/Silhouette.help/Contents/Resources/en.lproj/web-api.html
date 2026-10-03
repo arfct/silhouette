@@ -33,7 +33,7 @@ console.log(silhouette.face);   // the most recent face object, or null</code></
 <h2>Writing a page</h2>
 <ul>
 <li>The page is the background, so the person covers its centre. Put readouts near the edges, or draw things meant to sit behind the head, like the plane in the bundled test page.</li>
-<li>The output is not mirrored, but Silhouette's preview is. Text that should read correctly in the preview needs <code>transform: scaleX(-1)</code>; text for the people on the call should not be mirrored.</li>
+<li>The output is never mirrored. Silhouette's preview is mirrored only for a live camera with Mirror on. <code>silhouette.mirrored</code> says which, the <code>silhouette-mirrored</code> class on <code>&lt;html&gt;</code> tracks it for CSS, and <code>silhouette.on('mirror', fn)</code> reports changes. Text that should read correctly in the preview can use <code>.silhouette-mirrored .label { transform: scaleX(-1) }</code>; text for the people on the call should not be mirrored.</li>
 <li>Snapshots cost WebKit GPU time. Avoid <code>backdrop-filter</code>, continuous CSS transitions, and animation loops; move things only when a face event arrives.</li>
 <li>The bundled <b>Test page</b> is the reference example.</li>
 </ul>

@@ -11,13 +11,15 @@
   #plane { width: 100%; height: 100%; border: 3px solid rgba(255,255,255,.85); background: rgba(255,255,255,.14); border-radius: 50%; box-sizing: border-box; }
   .eye { position: absolute; width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; background: rgba(255,255,255,.25); transform: translate(-50%, -50%); }
   .eye.closed { height: 4px; border-radius: 4px; }
-  /* Mirrored so it reads correctly in the (mirrored) preview. */
-  #card { position: absolute; left: 48px; top: 40px; transform: scaleX(-1); transform-origin: center; text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  /* Text mirrors itself when Silhouette's preview is mirrored, so it reads correctly there. */
+  #card { position: absolute; left: 48px; top: 40px; transform-origin: center; text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .silhouette-mirrored #card { transform: scaleX(-1); }
   #card h1 { margin: 0 0 10px; font-size: 22px; letter-spacing: .1em; text-transform: uppercase; color: #e0e0e0; }
   #card table { border-collapse: collapse; }
   #card td { padding: 2px 24px 2px 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
   #card td:last-child { text-align: right; color: #fff; }
-  #nodata { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scaleX(-1); color: #ddd; }
+  #nodata { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #ddd; }
+  .silhouette-mirrored #nodata { transform: translate(-50%, -50%) scaleX(-1); }
 </style>
 </head>
 <body>

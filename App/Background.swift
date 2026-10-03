@@ -48,18 +48,8 @@ final class BackgroundController: NSObject {
         loader = MTKTextureLoader(device: renderer.device)
         let config = WKWebViewConfiguration()
         config.mediaTypesRequiringUserActionForPlayback = []
-        // window.silhouette: pages subscribe with silhouette.on('face', fn).
-        let bridge = """
-        (function(){ if (window.silhouette) return;
-          const L = {};
-          window.silhouette = {
-            face: null,
-            on(evt, cb) { (L[evt] ||= []).push(cb); },
-            _update(f) { this.face = f; (L.face || []).forEach(cb => cb(f)); }
-          };
-        })();
-        """
-        config.userContentController.addUserScript(WKUserScript(source: bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        config.userContentController.addUserScript(WKUserScript(source: "window.__silhouetteMirrored = true;", injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        config.userContentController.addUserScript(WKUserScript(source: Self.bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: VirtualCameraConstants.width,
                                           height: VirtualCameraConstants.height), configuration: config)
         webView.isHidden = true
@@ -68,6 +58,38 @@ final class BackgroundController: NSObject {
         webView.setValue(false, forKey: "drawsBackground")
         webView.underPageBackgroundColor = .clear
         super.init()
+    }
+
+    /// window.silhouette: pages subscribe with silhouette.on('face', fn) and
+    /// silhouette.on('mirror', fn). `mirrored` says whether Silhouette's preview is
+    /// mirrored, mirrored to <html class="silhouette-mirrored"> for CSS.
+    private static let bridge = """
+    (function(){ if (window.silhouette) return;
+      const L = {};
+      const apply = m => document.documentElement && document.documentElement.classList.toggle('silhouette-mirrored', m);
+      window.silhouette = {
+        face: null,
+        mirrored: !!window.__silhouetteMirrored,
+        on(evt, cb) { (L[evt] ||= []).push(cb); },
+        _update(f) { this.face = f; (L.face || []).forEach(cb => cb(f)); },
+        _setMirrored(m) { this.mirrored = m; apply(m); (L.mirror || []).forEach(cb => cb(m)); }
+      };
+      apply(window.silhouette.mirrored);
+      document.addEventListener('DOMContentLoaded', () => apply(window.silhouette.mirrored));
+    })();
+    """
+
+    /// Whether Silhouette's preview is mirrored, so pages can mirror text that
+    /// should read correctly in it. Persisted into new page loads.
+    var previewMirrored = true {
+        didSet {
+            guard previewMirrored != oldValue else { return }
+            let ucc = webView.configuration.userContentController
+            ucc.removeAllUserScripts()
+            ucc.addUserScript(WKUserScript(source: "window.__silhouetteMirrored = \(previewMirrored);", injectionTime: .atDocumentStart, forMainFrameOnly: false))
+            ucc.addUserScript(WKUserScript(source: Self.bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+            webView.evaluateJavaScript("window.silhouette && silhouette._setMirrored(\(previewMirrored));", completionHandler: nil)
+        }
     }
 
     /// The renderer slot this layer draws into.

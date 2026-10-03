@@ -16,7 +16,7 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     ENABLE_HARDENED_RUNTIME: YES
     MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "58"
+    CURRENT_PROJECT_VERSION: "59"
 targets:
   Silhouette:
     type: application

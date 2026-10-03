@@ -212,6 +212,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     var onCameraSelected: ((AVCaptureDevice) -> Void)?
     var onTestPatternSelected: (() -> Void)?
+    var onSampleSelected: (() -> Void)?
     var onChooseVideo: (() -> Void)?
     /// A movie from the recent list, by path.
     var onVideoSelected: ((String) -> Void)?
@@ -340,7 +341,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         mirrorSwitch.target = self; mirrorSwitch.action = #selector(mirrorChanged)
         let toggles = NSStackView(views: [
             inlineSwitch("4K", supersampleSwitch, tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work."),
-            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview like a mirror. The virtual camera output is never mirrored."),
+            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored."),
         ])
         toggles.spacing = 14
         toggles.distribution = .equalSpacing
@@ -708,15 +709,17 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     // MARK: State in
 
-    /// Items: devices, separator, Test pattern, recent movies, separator, Video file…
+    /// Items: devices, separator, Test pattern, Sample video, recent movies, separator, Video file…
     func setDevices(_ devices: [AVCaptureDevice], selected: AVCaptureDevice?, testPattern: Bool = false,
-                    videos: [String] = [], selectedVideo: String? = nil) {
+                    sample: Bool = false, videos: [String] = [], selectedVideo: String? = nil) {
         self.devices = devices
         videoPaths = videos
         cameraPopup.removeAllItems()
         cameraPopup.addItems(withTitles: devices.map(\.localizedName))
         cameraPopup.menu?.addItem(.separator())
         cameraPopup.addItem(withTitle: "Test pattern")
+        cameraPopup.addItem(withTitle: "Sample video")
+        cameraPopup.lastItem?.toolTip = "A short green screen clip bundled with Silhouette, for trying the key without a backdrop."
         for path in videos {
             let item = NSMenuItem(title: (path as NSString).lastPathComponent, action: nil, keyEquivalent: "")
             item.toolTip = path
@@ -726,8 +729,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         cameraPopup.addItem(withTitle: "Video file…")
         if testPattern {
             cameraPopup.selectItem(at: devices.count + 1)
+        } else if sample {
+            cameraPopup.selectItem(at: devices.count + 2)
         } else if let selectedVideo, let i = videos.firstIndex(of: selectedVideo) {
-            cameraPopup.selectItem(at: devices.count + 2 + i)
+            cameraPopup.selectItem(at: devices.count + 3 + i)
         } else if let selected, let i = devices.firstIndex(where: { $0.uniqueID == selected.uniqueID }) {
             cameraPopup.selectItem(at: i)
         }
@@ -853,9 +858,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     @objc private func cameraChanged() {
         let i = cameraPopup.indexOfSelectedItem
-        let firstVideo = devices.count + 2
+        let firstVideo = devices.count + 3
         if devices.indices.contains(i) { onCameraSelected?(devices[i]) }
         else if i == devices.count + 1 { onTestPatternSelected?() }
+        else if i == devices.count + 2 { onSampleSelected?() }
         else if i >= firstVideo && i < firstVideo + videoPaths.count { onVideoSelected?(videoPaths[i - firstVideo]) }
         else if i == cameraPopup.numberOfItems - 1 { onChooseVideo?() }
     }

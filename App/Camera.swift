@@ -4,6 +4,9 @@ import AVFoundation
 /// YCbCr, which the shader keys directly.
 final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     var onFrame: ((CVPixelBuffer) -> Void)?
+    /// Whether frames from the current source need mirroring to look right
+    /// (a movie whose display matrix flips it). Cameras and the test pattern: false.
+    var onSourceMirrored: ((Bool) -> Void)?
     private(set) var currentDevice: AVCaptureDevice?
 
     private let session = AVCaptureSession()
@@ -41,6 +44,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 
     func startTestPattern() {
+        onSourceMirrored?(false)
         usingTestPattern = true
         currentDevice = nil
         stopVideo()
@@ -54,8 +58,10 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         currentDevice = nil
         queue.async { [self] in if session.isRunning { session.stopRunning() } }
         stopVideo()
+        onSourceMirrored?(false)
         let v = VideoFileSource(url: url)
         v.onFrame = { [weak self] pb in self?.onFrame?(pb) }
+        v.onMirrored = { [weak self] mirrored in self?.onSourceMirrored?(mirrored) }
         video = v
         v.start()
     }
@@ -66,6 +72,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 
     func start(device: AVCaptureDevice) {
+        onSourceMirrored?(false)
         usingTestPattern = false
         testPattern.stop()
         stopVideo()

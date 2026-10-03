@@ -166,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         camera.preferHighResolution = settings.supersample
         controls.supersample = settings.supersample
         renderer.onOutput = { [weak self] buffer in self?.handleOutput(buffer) }
+        camera.onSourceMirrored = { [weak self] mirrored in self?.renderer.sourceMirrored = mirrored }
         camera.onFrame = { [weak self] pixelBuffer in
             guard let self else { return }
             frameLock.lock()
@@ -348,6 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func devicesChanged() {
         if controls.frozen { setFrozen(false) }   // a new source means live video again
+        defer { updatePreviewMirror() }
         let devices = Camera.availableDevices()
         let id = settings.cameraID ?? ""
         if id.hasPrefix(VideoFileSource.prefix) {
@@ -365,6 +367,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // the video comes back when it is available again.
             Logger(subsystem: VirtualCameraConstants.appBundleID, category: "files").error("video source unavailable, keeping it remembered")
             videoFile = nil
+        }
+        if id == Self.sampleSourceID, let url = Self.sampleVideoURL {
+            if camera.currentVideoURL != url { camera.startVideo(url: url) }
+            controls.setDevices(devices, selected: nil, sample: true, videos: settings.recentVideos)
+            return
         }
         if id == TestPatternSource.id || (devices.isEmpty && !camera.usingTestPattern) {
             if !camera.usingTestPattern { camera.startTestPattern() }
@@ -559,6 +566,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         timer.resume()
     }
 
+    /// Mirror the preview only for live cameras, where it should behave like a
+    /// mirror. Movies and the test pattern show as recorded. The output is never mirrored.
+    private func updatePreviewMirror() {
+        let liveCamera = !camera.usingTestPattern && camera.currentVideoURL == nil
+        let mirrored = settings.mirrorPreview && liveCamera
+        preview.mirrored = mirrored
+        controls.mirrorOffsetPad = mirrored
+        background.previewMirrored = mirrored
+        foreground.previewMirrored = mirrored
+    }
+
+    /// The bundled green screen clip, offered as a source.
+    static let sampleSourceID = "sample"
+    static let sampleVideoURL = Bundle.main.url(forResource: "Sample", withExtension: "mp4")
+
     /// 15 Hz with a detection every fourth tracked frame, or 30 Hz with one every other.
     private func applyTrackingRate() {
         renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
@@ -594,9 +616,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func setMirrorPreview(_ on: Bool) {
         settings.mirrorPreview = on
         settings.save()
-        preview.mirrored = on
-        controls.mirrorOffsetPad = on
         controls.mirrorPreview = on
+        updatePreviewMirror()
     }
 
     @objc private func toggleKeepOnTop() {
@@ -786,6 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.camera.start(device: device)
             self?.settings.cameraID = device.uniqueID
             self?.settings.save()
+            self?.updatePreviewMirror()
         }
         controls.onChooseVideo = { [weak self] in self?.chooseVideo() }
         controls.onAutoKey = { [weak self] in
@@ -820,10 +842,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             renderer.trackingEnabled = on
             if !on { preview.showFace(nil) }
         }
+        controls.onSampleSelected = { [weak self] in
+            guard let self else { return }
+            settings.cameraID = Self.sampleSourceID
+            settings.save()
+            devicesChanged()
+        }
         controls.onTestPatternSelected = { [weak self] in
             self?.camera.startTestPattern()
             self?.settings.cameraID = TestPatternSource.id
             self?.settings.save()
+            self?.updatePreviewMirror()
         }
         controls.onSupersample = { [weak self] on in
             guard let self else { return }

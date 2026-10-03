@@ -54,8 +54,12 @@ the output.
 - The page is the background, so the person covers its centre. Put
   readouts near the edges, or draw things that are meant to sit behind the
   head, like the plane in the bundled test page.
-- The output is not mirrored, but the app's preview is. Text that should
-  read correctly in the preview needs `transform: scaleX(-1)`; text for the
+- The output is never mirrored. The app's preview is mirrored only for a
+  live camera with Mirror on. `silhouette.mirrored` says which, the
+  `silhouette-mirrored` class on `<html>` tracks it for CSS, and
+  `silhouette.on('mirror', fn)` reports changes. Text that should read
+  correctly in the preview can use
+  `.silhouette-mirrored .label { transform: scaleX(-1) }`; text for the
   people on the call should not be mirrored.
 - Snapshots cost WebKit GPU time. Avoid `backdrop-filter`, continuous CSS
   transitions, and animation loops; move things only when a face event

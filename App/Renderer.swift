@@ -243,7 +243,15 @@ final class Renderer {
         featherSigma = -1
     }
 
+    private var mirrorSource = false
+    /// Mirror the camera source horizontally (movies flagged as flipped).
+    var sourceMirrored: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return mirrorSource }
+        set { lock.lock(); mirrorSource = newValue; lock.unlock() }
+    }
+
     /// Output uv → camera uv mapping of the last rendered frame (aspect fill).
+    /// A mirrored source has a negative x scale.
     var cameraMapping: (scale: SIMD2<Float>, offset: SIMD2<Float>) {
         lock.lock(); defer { lock.unlock() }
         return (lastCamScale, lastCamOffset)
@@ -287,9 +295,10 @@ final class Renderer {
         guard let outBuffer,
               let out = Self.texture(cache, outBuffer, plane: 0, format: .bgra8Unorm, width: outputWidth, height: outputHeight) else { return }
 
-        let (camScale, camOffset) = Self.fill(sourceAspect: Float(camW) / Float(camH),
+        var (camScale, camOffset) = Self.fill(sourceAspect: Float(camW) / Float(camH),
                                               destAspect: Float(outputWidth) / Float(outputHeight))
         lock.lock()
+        if mirrorSource { camScale.x = -camScale.x; camOffset.x = 1 - camOffset.x }
         var p = params
         let bg = background
         let fg = foreground
@@ -313,7 +322,7 @@ final class Renderer {
         p.chromaTexel = SIMD2<Float>(1 / Float(chromaW), 1 / Float(chromaH))
         // Shrink is set in 1920×1080 output pixels; the shader erodes in chroma
         // texels, so convert for this source's resolution and aspect-fill scale.
-        p.edge *= camScale.x * Float(chromaW) / Float(VirtualCameraConstants.width)
+        p.edge *= abs(camScale.x) * Float(chromaW) / Float(VirtualCameraConstants.width)
         if let bg {
             p.hasBackground = 1
             (p.bgScale, p.bgOffset) = Self.fill(sourceAspect: Float(bg.width) / Float(bg.height),
