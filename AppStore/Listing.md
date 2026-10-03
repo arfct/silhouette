@@ -57,11 +57,11 @@ Requires a physical green or blue backdrop and macOS 14 or later.
 
 ## Support URL
 
-(needed: a page with a contact email)
+https://arfct.github.io/silhouette/support/
 
 ## Marketing URL (optional)
 
-(optional)
+https://arfct.github.io/silhouette/
 
 ## Copyright
 
@@ -69,20 +69,18 @@ Requires a physical green or blue backdrop and macOS 14 or later.
 
 ## Category
 
-Primary: Video. Secondary: Productivity.
+Primary: Photo & Video. Secondary: Productivity.
 
 ## Age rating notes
 
-The background and foreground layers load any web address the user types. In the age rating questionnaire that counts as "Unrestricted Web Access", which raises the rating. Answer "Yes" there; every other content question is "None".
+Answer "No" to every question, including Unrestricted Web Access. The result is 4+.
+
+Silhouette is not a web browser. Web pages are compositing sources, like images or movies: drawn off screen, scaled, and mirrored into the video frame, with no address bar, navigation, links, or input. The App Review notes explain this so the reviewer sees the reasoning.
 
 ## App Privacy
 
 - Data collection: Data Not Collected.
-- Privacy policy URL: (needed; one paragraph is enough, see draft below)
-
-Draft privacy policy:
-
-> Silhouette processes your camera video on your Mac. Video is sent only to the apps you select the Silhouette camera in. Silhouette does not collect, store, or transmit personal data, has no accounts, and contains no analytics or advertising. Web pages you choose as backgrounds or foregrounds are loaded directly from their sites and are subject to those sites' own policies.
+- Privacy policy URL: https://arfct.github.io/silhouette/privacy/
 
 ## App Review notes (4000)
 
@@ -97,10 +95,12 @@ Testing the virtual camera:
 1. On first launch macOS asks to allow the camera extension. Approve it in System Settings > General > Login Items & Extensions > Camera Extensions.
 2. Open FaceTime or Photo Booth and choose "Silhouette" as the camera. The composite from step 3 appears there.
 
+About web page layers:
+Silhouette is not a web browser. The Background and Foreground layers can render a web page the user specifies, purely as a compositing source, like an image or a movie. The page is drawn off screen into a texture, then scaled and mirrored into the video frame. It is never shown as an interactive page: there is no address bar, no navigation, no links to follow, and no way to click, scroll, or type into it. For that reason we answered No to Unrestricted Web Access in the age rating. NSAllowsArbitraryLoads is set so these compositing pages can come from any address the user provides.
+
 Notes:
 - No account or sign-in is needed.
-- NSAllowsArbitraryLoads is set because the background and foreground layers load any web address the user types, the same as a browser address bar.
-- Face tracking (Face Tracking section) uses Vision on device; nothing leaves the Mac.
+- Face tracking uses Vision on device; nothing leaves the Mac.
 
 ## App Sandbox information
 
