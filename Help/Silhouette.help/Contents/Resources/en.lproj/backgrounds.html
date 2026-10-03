@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Backgrounds</title>
+<meta name="description" content="None, file, and web backgrounds.">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<a name="backgrounds"></a>
+<h1>Backgrounds</h1>
+<p>The Layers group has a <b>Background</b> box for what shows behind you and a <b>Foreground</b> box for what shows in front. Each takes a web address, a file path, or a hex colour such as <code>#1E90FF</code>. Their shared list holds <b>None</b>, the bundled <b>Test page</b>, your last ten entries, and <b>Choose File…</b>. Type a value and press <kbd>Return</kbd>, or pick from the list. Long entries show their end, which is the part that differs.</p>
+<h2>None</h2>
+<p>The keyed-out area is transparent. Most video apps show it as black; the preview shows a checkerboard.</p>
+<h2>Files</h2>
+<p>An image or a movie. Images load once; movies loop and decode in hardware. Files you pick are remembered and reopen on the next launch, and recent files reopen from the list. A path typed by hand works only for files the app may read; use <b>Choose File…</b> to grant access. You can also drop a file on the preview.</p>
+<h2>Colours</h2>
+<p>Type a hex colour, with or without the hash, in three, four, six, or eight digits. The last pair of an eight-digit colour is alpha, so <code>#00000080</code> as a foreground is a half-strength darkening wash.</p>
+<h2>Foreground</h2>
+<p>The foreground is composited over the keyed camera and the background, so it needs transparency to be useful: a PNG with an alpha channel, a web page with a transparent body, or a colour with alpha. An opaque image or movie covers the whole frame. Web pages have no default white background in either layer, so a page covers only what it draws; the bundled test page is transparent and works as a foreground.</p>
+<h2>Web pages</h2>
+<p>A web page rendered at 1920×1080 behind you. Pages can react to face tracking; see <a href="web-api.html">Web page API</a>.</p>
+<p>Pages are snapshotted about 15 times a second while they change, so they cost more than an image. Static pages back off to 3 snapshots a second.</p>
+<h2>Fit</h2>
+<p>The output is always 1920×1080 at 30 frames per second. The camera and the background are scaled to fill it.</p>
+<a class="back" href="index.html">‹ Silhouette Help</a>
+</body></html>

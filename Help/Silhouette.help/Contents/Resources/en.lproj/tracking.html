@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Face tracking and the shadow</title>
+<meta name="description" content="How face tracking works and what it drives.">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<a name="tracking"></a>
+<h1>Face tracking and the shadow</h1>
+<p>With <b>Track face and eyes</b> on, Silhouette runs Apple's Vision face detector on a small copy of each frame, on the Neural Engine. It finds the face box, head pose (yaw, pitch, roll), pupils, eye openness, nose, and mouth, about 15 times a second. The preview draws the box and eyes; the virtual camera output never does.</p>
+<h2>What uses it</h2>
+<ul>
+<li><b>Web pages</b> receive every update through <code>window.silhouette</code>. The bundled test page shows the values and tilts a plane behind your head.</li>
+<li><b>Vary with distance</b> in the Shadow section scales the shadow with the face's size in frame. Slider values apply at a face 40% of the frame tall. Lean in and the shadow gets longer, softer, and lighter; sit back and it gets shorter, sharper, and denser. Turning it on enables tracking.</li>
+</ul>
+<h2>Cost</h2>
+<p>Tracking adds roughly 7% CPU on Apple silicon. Everything stays on the machine; no frames leave it.</p>
+<a class="back" href="index.html">‹ Silhouette Help</a>
+</body></html>
