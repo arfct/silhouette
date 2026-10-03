@@ -13,9 +13,9 @@ Requires macOS 14 or later and a physical green or blue backdrop.
 
 ## Links
 
-- [Support](SUPPORT.md)
-- [Privacy policy](PRIVACY.md)
-- [Terms of use](TERMS.md)
+- [Support](https://arfct.github.io/silhouette/support/)
+- [Privacy policy](https://arfct.github.io/silhouette/privacy/)
+- [Terms of use](https://arfct.github.io/silhouette/terms/)
 
 ## Building from source
 
@@ -57,7 +57,7 @@ virtual camera is only installed from `/Applications`.
   landmark contours; High frame rate tracks every frame. Web pages get the
   data through `window.silhouette.on('face', fn)`: box, centre, yaw, pitch,
   roll, eyes, nose, mouth, contours, estimated distance, and pose and
-  projection matrices. See `Demo/WEB-API.md`.
+  projection matrices. See the [web page API](https://arfct.github.io/silhouette/web-api/).
 - No green screen handy? Pick "Test pattern" in the Source menu: a synthetic
   green backdrop with a face shape, fine hair strokes, a soft gradient edge,
   a moving square, and sensor-like noise.

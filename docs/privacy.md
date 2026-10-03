@@ -1,3 +1,8 @@
+---
+title: Silhouette privacy policy
+permalink: /privacy/
+---
+
 # Silhouette privacy policy
 
 Last updated: 3 October 2026
