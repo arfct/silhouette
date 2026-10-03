@@ -27,6 +27,7 @@ struct LayerSettings: Codable {
 struct SourceKey: Codable {
     var cb: Float, cr: Float, luma: Float, tolerance: Float, softness: Float
     var temporal: Float?
+    var edge: Float?, feather: Float?, spill: Float?
 }
 
 struct Settings: Codable {
@@ -603,6 +604,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 p.keyCbCr = SIMD2(saved.cb, saved.cr); p.keyLuma = saved.luma
                 p.tolerance = saved.tolerance; p.softness = saved.softness
                 if let t = saved.temporal { p.temporal = t }
+                if let e = saved.edge { p.edge = e }
+                if let f = saved.feather { p.feather = f }
+                if let s = saved.spill { p.spill = s }
             }
             controls.apply(params: renderer.keyParams)
             settings.params = renderer.keyParams
@@ -622,7 +626,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func currentSourceKey() -> SourceKey {
         let p = renderer.keyParams
-        return SourceKey(cb: p.keyCbCr.x, cr: p.keyCbCr.y, luma: p.keyLuma, tolerance: p.tolerance, softness: p.softness, temporal: p.temporal)
+        return SourceKey(cb: p.keyCbCr.x, cr: p.keyCbCr.y, luma: p.keyLuma, tolerance: p.tolerance, softness: p.softness,
+                         temporal: p.temporal, edge: p.edge, feather: p.feather, spill: p.spill)
     }
 
     private func rememberKeyForSource() {
@@ -681,14 +686,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         renderer.update { p in
             p.keyCbCr = result.keyCbCr; p.keyLuma = result.keyLuma
             p.tolerance = result.tolerance; p.softness = result.softness
-            p.temporal = result.temporal
+            p.edge = result.edge; p.feather = result.feather; p.spill = result.spill
         }
         controls.apply(params: renderer.keyParams)
         paramsChanged()
         let pct = Int((result.edgeCoverage * 100).rounded())
-        var text = "Auto: \(result.colorName) backdrop, \(pct)% of the edge keyed."
-        if result.temporal > 0.05 { text += " Noisy source, so Stabilize is on." }
-        controls.showKeyHint(text, for: 6)
+        let text = String(format: "Auto: %@ backdrop, %d%% of the edge keyed. Shrink %.1f, Blur %.1f, Desaturate %d.",
+                          result.colorName, pct, result.edge, result.feather, Int((result.spill * 100).rounded()))
+        controls.showKeyHint(text, for: 8)
     }
 
     /// Mirror the preview only for live cameras, where it should behave like a

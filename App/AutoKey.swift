@@ -8,8 +8,11 @@ struct AutoKeyResult {
     var keyLuma: Float
     var tolerance: Float
     var softness: Float
-    /// Suggested Stabilize, from frame-to-frame chroma noise in the backdrop.
-    var temporal: Float
+    /// Shrink and Blur in 1080p output pixels, from the measured fringe width.
+    var edge: Float
+    var feather: Float
+    /// Desaturate (0…1), from key-coloured bounce measured on the subject.
+    var spill: Float
     /// Fraction of the perimeter samples the chosen range removes.
     var edgeCoverage: Float
     /// 0…1. Low when the perimeter is not one colour or the colour is nearly grey.
@@ -23,16 +26,19 @@ struct AutoKeyResult {
 /// under the face where the subject's body meets the bottom edge, and minus
 /// the face itself. The dominant chroma of that ring is the key. Tolerance is
 /// set so nearly all of the ring is removed; softness ends well short of the
-/// nearest skin tone so the face is never eaten. Several frames are pooled,
-/// which also gives a per-pixel noise estimate for Stabilize.
+/// nearest skin tone so the face is never eaten. Full-resolution row scans
+/// give the width of the backdrop-to-subject fringe, which sets Shrink and
+/// Blur, and the key-coloured tint on the subject sets Desaturate.
 final class AutoKeyAnalyzer {
     private struct Sample { var cb: Float; var cr: Float; var y: Float }
 
     private var backdrop: [Sample] = []
     private var foreground: [SIMD2<Float>] = []
-    /// Perimeter chroma per frame on a fixed grid, for the temporal noise estimate.
-    private var perimeterByFrame: [[SIMD2<Float>]] = []
-    private var gridKey: (Int, Int)?
+    /// Everything that is neither ring nor face: clothes, hair, props.
+    private var subject: [SIMD2<Float>] = []
+    /// Full-resolution chroma along a few rows, for the fringe measurement.
+    private var rowScans: [[SIMD2<Float>]] = []
+    private var chromaWidth = 0
     private(set) var frameCount = 0
     private var faceBox: CGRect?   // camera uv, origin top-left; the latest detection
 
@@ -72,7 +78,7 @@ final class AutoKeyAnalyzer {
         let faceExpanded = face.map { $0.insetBy(dx: -$0.width * 0.3, dy: -$0.height * 0.3) }
         let faceInner = face.map { $0.insetBy(dx: $0.width * 0.2, dy: $0.height * 0.2) }
 
-        var perimeter: [SIMD2<Float>] = []
+        chromaWidth = w
         var y = 0
         while y < h {
             let crow = cbase.advanced(by: y * cbpr).assumingMemoryBound(to: UInt8.self)
@@ -93,17 +99,27 @@ final class AutoKeyAnalyzer {
                 let inBodyCorridor = v > 0.55 && abs(u - bodyU) < bodyHalf
                 if inRing && !inFace && !inBodyCorridor {
                     backdrop.append(Sample(cb: cb, cr: cr, y: luma))
-                    perimeter.append(SIMD2(cb, cr))
+                } else if let faceInner, faceInner.contains(point) {
+                    foreground.append(SIMD2(cb, cr))
+                } else if !inRing && !inFace {
+                    subject.append(SIMD2(cb, cr))
                 }
-                if let faceInner, faceInner.contains(point) { foreground.append(SIMD2(cb, cr)) }
                 x += step
             }
             y += step
         }
-        // Only frames on the same grid take part in the noise estimate.
-        if gridKey == nil { gridKey = (w, h) }
-        if gridKey! == (w, h), perimeterByFrame.isEmpty || perimeterByFrame[0].count == perimeter.count {
-            perimeterByFrame.append(perimeter)
+        // Full-resolution scans of a few rows through the middle of the frame,
+        // where the subject usually is, for the fringe measurement.
+        for i in 0..<12 {
+            let ry = Int(Float(h) * (0.15 + 0.7 * Float(i) / 11))
+            let crow = cbase.advanced(by: ry * cbpr).assumingMemoryBound(to: UInt8.self)
+            var scan: [SIMD2<Float>] = []; scan.reserveCapacity(w)
+            for x in 0..<w {
+                var cb = Float(crow[x * 2]) / 255, cr = Float(crow[x * 2 + 1]) / 255
+                if videoRange { cb = (cb - 0.5) * (255 / 224) + 0.5; cr = (cr - 0.5) * (255 / 224) + 0.5 }
+                scan.append(SIMD2(cb, cr))
+            }
+            rowScans.append(scan)
         }
     }
 
@@ -156,23 +172,49 @@ final class AutoKeyAnalyzer {
         let mid = tolerance + (upper - tolerance) * 0.5
         let keyed = Float(distances.filter { $0 < mid }.count) / Float(distances.count)
 
-        // Temporal noise: chroma spread across frames at positions that are backdrop
-        // in every frame, so hair or a shoulder drifting through the ring does not count.
-        var temporal: Float = 0
-        if perimeterByFrame.count >= 3 {
-            let n = perimeterByFrame[0].count
-            var total: Float = 0, counted = 0
-            for i in 0..<n {
-                let values = perimeterByFrame.map { $0[i] }
-                guard values.allSatisfy({ simd_distance($0, key) < 0.1 }) else { continue }
-                let mean = values.reduce(SIMD2<Float>(0, 0), +) / Float(values.count)
-                total += values.map { simd_distance_squared($0, mean) }.reduce(0, +) / Float(values.count)
-                counted += 1
+        // Fringe: along each scanned row, runs of soft-band pixels sitting between
+        // backdrop and subject. Their median width, in chroma pixels, is how far
+        // the backdrop bleeds into the edge (chroma subsampling, lens blur, hair).
+        var fringeWidths: [Int] = []
+        for scan in rowScans {
+            var i = 0
+            while i < scan.count {
+                let d = simd_distance(scan[i], key)
+                if d >= tolerance && d < upper {
+                    var j = i
+                    while j < scan.count, simd_distance(scan[j], key) >= tolerance, simd_distance(scan[j], key) < upper { j += 1 }
+                    let before = i > 0 ? simd_distance(scan[i - 1], key) : -1
+                    let after = j < scan.count ? simd_distance(scan[j], key) : -1
+                    let bordersBackdrop = before >= 0 && before < tolerance || after >= 0 && after < tolerance
+                    let bordersSubject = before >= upper || after >= upper
+                    if bordersBackdrop && bordersSubject && j - i <= 24 { fringeWidths.append(j - i) }
+                    i = j
+                } else {
+                    i += 1
+                }
             }
-            if counted > 50 {
-                let sigma = (total / Float(counted)).squareRoot()
-                temporal = min(max((sigma - 0.008) / 0.04, 0), 0.4)
-            }
+        }
+        // Chroma pixels → 1080p output pixels (the chroma plane is half the camera width).
+        let outputPerChroma = Float(1920) / Float(max(chromaWidth, 1))
+        var fringe: Float = 1   // in output pixels; a sane default when no edge was found
+        if fringeWidths.count >= 8 {
+            let sorted = fringeWidths.sorted()
+            fringe = Float(sorted[sorted.count / 2]) * outputPerChroma
+        }
+        let edge = min(max((fringe * 0.4 * 10).rounded() / 10, 0), 3)
+        let feather = min(max((fringe * 0.3 * 10).rounded() / 10, 0.3), 2)
+
+        // Spill: how far subject chroma leans toward the key colour. The shader
+        // removes that component scaled by Desaturate, so size it to the lean.
+        var spill: Float = 0.5
+        let keyDir = simd_normalize(key - SIMD2<Float>(0.5, 0.5))
+        let leans = subject.filter { simd_distance($0, key) >= upper }.map { simd_dot($0 - SIMD2<Float>(0.5, 0.5), keyDir) }.filter { $0 > 0 }
+        if subject.count > 200 {
+            let leanFraction = Float(leans.count) / Float(subject.count)
+            let strong = leans.sorted()
+            let p90: Float = strong.isEmpty ? 0 : strong[Int(Float(strong.count - 1) * 0.9)]
+            spill = min(max(leanFraction * 2 + p90 / 0.05, 0.2), 1)
+            spill = (spill * 20).rounded() / 20
         }
 
         // Confidence: a saturated colour that covers most of the ring.
@@ -180,7 +222,7 @@ final class AutoKeyAnalyzer {
         let confidence = min(nearFraction, 1) * min(saturation / 0.12, 1)
 
         return AutoKeyResult(keyCbCr: key, keyLuma: lumaMean, tolerance: tolerance, softness: upper - tolerance,
-                             temporal: temporal, edgeCoverage: keyed, confidence: confidence,
+                             edge: edge, feather: feather, spill: spill, edgeCoverage: keyed, confidence: confidence,
                              colorName: Self.name(of: key))
     }
 

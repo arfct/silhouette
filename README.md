@@ -52,7 +52,8 @@ virtual camera is only installed from `/Applications`.
 - Auto runs when a source is first chosen: it pools a few frames, finds the
   dominant colour around the frame edge (skipping the face and the body
   under it), sets Color Range so the edge is removed and the face is kept,
-  and raises Stabilize for noisy sources. Each source remembers its key.
+  sets Shrink and Blur from the measured fringe, and Desaturate from the
+  tint on the subject. Stabilize is left alone. Each source remembers its key.
 - Or click the colour swatch, then click the backdrop in the preview to pick
   the key colour. The preview shows the unkeyed image while picking.
 - Any movie file works as the camera: Source → Video file…, or drop one on
