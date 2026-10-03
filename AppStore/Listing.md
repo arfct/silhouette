@@ -88,7 +88,7 @@ Silhouette is a chroma keyer that publishes its output as a virtual camera throu
 
 Testing without a green screen:
 1. Launch Silhouette from /Applications. When prompted, allow camera access.
-2. In the Source menu, choose "Test pattern". It shows a green backdrop with moving shapes, and the green is keyed out in the preview.
+2. In the Source menu, choose "Sample video", a bundled green screen clip, or "Test pattern". The green is keyed out in the preview.
 3. In Layers, set Background to "Test page" or type a colour such as #1E90FF to see the composite.
 
 Testing the virtual camera:

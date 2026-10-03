@@ -6,6 +6,9 @@ import QuartzCore
 /// produces, so 4K files exercise the whole pipeline.
 final class VideoFileSource {
     var onFrame: ((CVPixelBuffer) -> Void)?
+    /// Called once the track loads: true when its display matrix flips it
+    /// horizontally. Decoded frames come out unflipped, so the renderer mirrors them.
+    var onMirrored: ((Bool) -> Void)?
     static let prefix = "video:"
     let url: URL
 
@@ -40,6 +43,8 @@ final class VideoFileSource {
                 try? ct?.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
                 ct?.preferredTransform = transform
                 item = AVPlayerItem(asset: composition)
+                let mirrored = transform.a * transform.d - transform.b * transform.c < 0
+                await MainActor.run { self?.onMirrored?(mirrored) }
             } else {
                 item = AVPlayerItem(url: url)
             }

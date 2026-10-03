@@ -212,6 +212,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     var onCameraSelected: ((AVCaptureDevice) -> Void)?
     var onTestPatternSelected: (() -> Void)?
+    var onSampleSelected: (() -> Void)?
     var onChooseVideo: (() -> Void)?
     /// A movie from the recent list, by path.
     var onVideoSelected: ((String) -> Void)?
@@ -220,6 +221,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onMirrorPreview: ((Bool) -> Void)?
     var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
+    /// True freezes the current frame for tuning; false goes back to live video.
+    var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
     var onSupersample: ((Bool) -> Void)?
     /// Layer combo boxes: what the user committed, for the background or the foreground.
@@ -244,6 +247,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let supersampleSwitch = NSSwitch()
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
+    private let freezeButton = NSButton(title: "", target: nil, action: nil)
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
     private var highRateRow: NSView!
@@ -266,6 +270,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
+    private let autoButton = NSButton(title: "Auto", target: nil, action: nil)
+    private var hintTimer: Timer?
     private let keyRange = RangeSlider()
     private let offsetPad = OffsetPad()
     /// `scale` and `decimals` turn the stored value into what the field shows (percent, pixels).
@@ -337,11 +343,17 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         mirrorSwitch.target = self; mirrorSwitch.action = #selector(mirrorChanged)
         let toggles = NSStackView(views: [
             inlineSwitch("4K", supersampleSwitch, tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work."),
-            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview like a mirror. The virtual camera output is never mirrored."),
+            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored."),
         ])
         toggles.spacing = 14
         toggles.distribution = .equalSpacing
-        stack.addArrangedSubview(group("Source", trailing: nil, rows: [cameraPopup, toggles]))
+        freezeButton.bezelStyle = .accessoryBarAction
+        freezeButton.isBordered = false
+        freezeButton.imagePosition = .imageOnly
+        freezeButton.target = self
+        freezeButton.action = #selector(freezeTapped)
+        frozen = false
+        stack.addArrangedSubview(group("Source", trailing: freezeButton, rows: [cameraPopup, toggles]))
 
         // Layers: one combo box each for the background (behind the keyed camera)
         // and the foreground (over it). None, the test page, recent URLs, files and
@@ -374,14 +386,16 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         keySwatch.target = self
         keySwatch.action = #selector(pickKeyTapped)
         keySwatch.toolTip = "The backdrop colour being removed. Click to show the unkeyed image, then click the backdrop in the preview. Esc cancels."
-        let autoButton = NSButton(title: "Auto", target: self, action: #selector(autoKeyTapped)); autoButton.controlSize = .mini
-        autoButton.toolTip = "Sample the backdrop colour from the edges of the frame."
+        autoButton.title = "Auto"; autoButton.target = self; autoButton.action = #selector(autoKeyTapped); autoButton.controlSize = .mini
+        autoButton.toolTip = "Find the backdrop colour and range from the edges of the frame over about a second, avoiding the face and body. Runs by itself when a new source is chosen."
         keySwitch.target = self; keySwitch.action = #selector(keyToggled)
         keySwitch.controlSize = .mini
         keySwitch.toolTip = "Key out the backdrop. Off passes the camera through untouched, so the background and shadow have no effect."
         let keyTools = NSStackView(views: [keySwatch, autoButton, keySwitch]); keyTools.spacing = 8
         self.keyTools = keyTools
         keyHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        keyHint.textColor = .secondaryLabelColor
+        keyHint.preferredMaxLayoutWidth = Self.width - 48
         keyHint.isHidden = true
         keyRange.minValue = 0; keyRange.maxValue = 0.3
         keyRange.onChange = { [weak self] lo, hi in
@@ -395,7 +409,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
             columns([sliderCell("Desaturate", \.spill, 0...1, scale: 100, decimals: 0, tip: "Removes the backdrop's tint reflected onto hair and clothing, in percent."),
                      sliderCell("Stabilize", \.temporal, 0...0.9, scale: 100, decimals: 0, tip: "Blends the matte with the previous frame where the picture is static, to stop edge flicker from sensor noise. Percent of the previous frame kept; movement passes straight through.")]),
-            keyHint,
         ])
         body.orientation = .vertical
         body.alignment = .leading
@@ -407,7 +420,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         chromaDisclosure.target = self
         chromaDisclosure.action = #selector(chromaToggled)
         chromaDisclosure.toolTip = "Show or hide the chromakey controls"
-        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body]))
+        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -699,15 +712,17 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     // MARK: State in
 
-    /// Items: devices, separator, Test pattern, recent movies, separator, Video file…
+    /// Items: devices, separator, Test pattern, Sample video, recent movies, separator, Video file…
     func setDevices(_ devices: [AVCaptureDevice], selected: AVCaptureDevice?, testPattern: Bool = false,
-                    videos: [String] = [], selectedVideo: String? = nil) {
+                    sample: Bool = false, videos: [String] = [], selectedVideo: String? = nil) {
         self.devices = devices
         videoPaths = videos
         cameraPopup.removeAllItems()
         cameraPopup.addItems(withTitles: devices.map(\.localizedName))
         cameraPopup.menu?.addItem(.separator())
         cameraPopup.addItem(withTitle: "Test pattern")
+        cameraPopup.addItem(withTitle: "Sample video")
+        cameraPopup.lastItem?.toolTip = "A short green screen clip bundled with Silhouette, for trying the key without a backdrop."
         for path in videos {
             let item = NSMenuItem(title: (path as NSString).lastPathComponent, action: nil, keyEquivalent: "")
             item.toolTip = path
@@ -717,8 +732,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         cameraPopup.addItem(withTitle: "Video file…")
         if testPattern {
             cameraPopup.selectItem(at: devices.count + 1)
+        } else if sample {
+            cameraPopup.selectItem(at: devices.count + 2)
         } else if let selectedVideo, let i = videos.firstIndex(of: selectedVideo) {
-            cameraPopup.selectItem(at: devices.count + 2 + i)
+            cameraPopup.selectItem(at: devices.count + 3 + i)
         } else if let selected, let i = devices.firstIndex(where: { $0.uniqueID == selected.uniqueID }) {
             cameraPopup.selectItem(at: i)
         }
@@ -844,9 +861,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     @objc private func cameraChanged() {
         let i = cameraPopup.indexOfSelectedItem
-        let firstVideo = devices.count + 2
+        let firstVideo = devices.count + 3
         if devices.indices.contains(i) { onCameraSelected?(devices[i]) }
         else if i == devices.count + 1 { onTestPatternSelected?() }
+        else if i == devices.count + 2 { onSampleSelected?() }
         else if i >= firstVideo && i < firstVideo + videoPaths.count { onVideoSelected?(videoPaths[i - firstVideo]) }
         else if i == cameraPopup.numberOfItems - 1 { onChooseVideo?() }
     }
@@ -896,6 +914,38 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         set { overlaySwitch.state = newValue ? .on : .off }
     }
     @objc private func overlayChanged() { onFaceOverlay?(overlaySwitch.state == .on) }
+    /// Pause shows while live; play shows while frozen.
+    var frozen: Bool = false {
+        didSet {
+            let name = frozen ? "play.fill" : "pause.fill"
+            freezeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: frozen ? "Resume live video" : "Freeze frame")
+            freezeButton.contentTintColor = frozen ? .controlAccentColor : .secondaryLabelColor
+            freezeButton.toolTip = frozen
+                ? "Frozen on one frame. Click to go back to live video."
+                : "Freeze the current frame so you can tune the key without movement. The virtual camera shows the frozen frame until you resume."
+        }
+    }
+    @objc private func freezeTapped() { frozen.toggle(); onFreeze?(frozen) }
+
+    /// Auto is running: the button shows it and ignores clicks.
+    var autoRunning: Bool = false {
+        didSet {
+            autoButton.isEnabled = !autoRunning
+            autoButton.title = autoRunning ? "Auto…" : "Auto"
+        }
+    }
+
+    /// A line under the Chromakey controls, cleared after `seconds` (nil keeps it).
+    func showKeyHint(_ text: String?, for seconds: TimeInterval? = nil) {
+        hintTimer?.invalidate(); hintTimer = nil
+        guard let text else { keyHint.isHidden = true; return }
+        keyHint.stringValue = text
+        keyHint.isHidden = false
+        if let seconds {
+            hintTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in self?.keyHint.isHidden = true }
+        }
+    }
+
     @objc private func mirrorChanged() { onMirrorPreview?(mirrorSwitch.state == .on) }
 
     @objc private func connectedTapped() {

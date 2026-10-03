@@ -23,6 +23,13 @@ struct LayerSettings: Codable {
     }
 }
 
+/// The key colour and range that worked for one source, restored when it comes back.
+struct SourceKey: Codable {
+    var cb: Float, cr: Float, luma: Float, tolerance: Float, softness: Float
+    var temporal: Float?
+    var edge: Float?, feather: Float?, spill: Float?
+}
+
 struct Settings: Codable {
     var params = KeyParams()
     var mode: BackgroundMode = .none
@@ -31,6 +38,8 @@ struct Settings: Codable {
     var colorHex: String?
     /// Recent movie sources, most recent first, at most ten.
     var recentVideos: [String] = []
+    /// Key settings per source id (camera unique id, movie path, sample, test pattern).
+    var sourceKeys: [String: SourceKey] = [:]
     var cameraID: String?
     /// Security-scoped bookmarks so the sandboxed app can reopen chosen files.
     var videoBookmark: Data?
@@ -82,6 +91,7 @@ struct Settings: Codable {
         fileBookmarks = (try? c.decodeIfPresent([String: Data].self, forKey: .fileBookmarks)) ?? [:]
         foreground = (try? c.decodeIfPresent(LayerSettings.self, forKey: .foreground)) ?? LayerSettings()
         recentVideos = (try? c.decodeIfPresent([String].self, forKey: .recentVideos)) ?? []
+        sourceKeys = (try? c.decodeIfPresent([String: SourceKey].self, forKey: .sourceKeys)) ?? [:]
         cameraID = try? c.decodeIfPresent(String.self, forKey: .cameraID)
         videoBookmark = try? c.decodeIfPresent(Data.self, forKey: .videoBookmark)
         // Older builds remembered one movie source; seed the list with it.
@@ -124,6 +134,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sidebarItem: NSSplitViewItem!
     private var sidebarObservation: NSKeyValueObservation?
     private var previewLeading: NSLayoutConstraint!
+    /// Freeze frame: the newest camera frame, and the one being held while frozen.
+    private let frameLock = NSLock()
+    private var latestFrame: CVPixelBuffer?
+    private var frozenFrame: CVPixelBuffer?
+    private var freezeTimer: DispatchSourceTimer?
+    private let freezeQueue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).freeze", qos: .userInteractive)
+    /// Auto key: pools a few frames on its own queue, then applies the result.
+    private var autoAnalyzer: AutoKeyAnalyzer?
+    private var autoNextSample: CFTimeInterval = 0
+    private let autoQueue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).autokey", qos: .userInitiated)
+    private static let autoFrames = 6
+    private static let autoFrameSpacing: CFTimeInterval = 0.2
+    /// The source whose key is loaded, so a source change can restore or re-run Auto.
+    private var keyedSourceID: String?
     /// fps and GPU time, in the title area above the preview.
     private let statsLabel = NSTextField(labelWithString: "")
     private let renderer = Renderer()
@@ -160,7 +184,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         camera.preferHighResolution = settings.supersample
         controls.supersample = settings.supersample
         renderer.onOutput = { [weak self] buffer in self?.handleOutput(buffer) }
-        camera.onFrame = { [weak self] pixelBuffer in self?.renderer.render(pixelBuffer) }
+        camera.onSourceMirrored = { [weak self] mirrored in self?.renderer.sourceMirrored = mirrored }
+        camera.onFrame = { [weak self] pixelBuffer in
+            guard let self else { return }
+            frameLock.lock()
+            let frozen = frozenFrame != nil
+            if !frozen { latestFrame = pixelBuffer }
+            let analyzer = autoAnalyzer
+            let wantSample = analyzer != nil && CACurrentMediaTime() >= autoNextSample
+            if wantSample { autoNextSample = CACurrentMediaTime() + Self.autoFrameSpacing }
+            frameLock.unlock()
+            if !frozen { renderer.render(pixelBuffer) }   // frozen: the timer renders the held frame
+            if wantSample, let analyzer { autoQueue.async { [weak self] in self?.autoSample(pixelBuffer, into: analyzer) } }
+        }
+        controls.onFreeze = { [weak self] on in self?.setFrozen(on) }
         renderer.onTrackingFrame = { [weak self] small in
             guard let self else { return }
             let m = renderer.cameraMapping
@@ -333,6 +370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func devicesChanged() {
+        if controls.frozen { setFrozen(false) }   // a new source means live video again
+        defer { updatePreviewMirror(); sourceDidChange() }
         let devices = Camera.availableDevices()
         let id = settings.cameraID ?? ""
         if id.hasPrefix(VideoFileSource.prefix) {
@@ -350,6 +389,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // the video comes back when it is available again.
             Logger(subsystem: VirtualCameraConstants.appBundleID, category: "files").error("video source unavailable, keeping it remembered")
             videoFile = nil
+        }
+        if id == Self.sampleSourceID, let url = Self.sampleVideoURL {
+            if camera.currentVideoURL != url { camera.startVideo(url: url) }
+            controls.setDevices(devices, selected: nil, sample: true, videos: settings.recentVideos)
+            return
         }
         if id == TestPatternSource.id || (devices.isEmpty && !camera.usingTestPattern) {
             if !camera.usingTestPattern { camera.startTestPattern() }
@@ -522,6 +566,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Params
 
+    /// Hold the newest frame and keep rendering it at the output rate, so key and
+    /// shadow changes show immediately and the virtual camera never stalls.
+    private func setFrozen(_ on: Bool) {
+        frameLock.lock()
+        frozenFrame = on ? latestFrame : nil
+        let holding = frozenFrame != nil
+        frameLock.unlock()
+        freezeTimer?.cancel()
+        freezeTimer = nil
+        controls.frozen = holding
+        guard holding else { return }
+        let timer = DispatchSource.makeTimerSource(queue: freezeQueue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(VirtualCameraConstants.frameRate))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            frameLock.lock(); let frame = frozenFrame; frameLock.unlock()
+            if let frame { renderer.render(frame) }
+        }
+        freezeTimer = timer
+        timer.resume()
+    }
+
+    // MARK: Auto key
+
+    /// A different source is live: restore the key that worked for it, or run
+    /// Auto once frames are flowing. The first launch after this feature seeds
+    /// the current source with the existing settings so nothing changes underfoot.
+    private func sourceDidChange() {
+        let id = currentSourceID
+        guard id != keyedSourceID else { return }
+        if keyedSourceID == nil && settings.sourceKeys.isEmpty { settings.sourceKeys[id] = currentSourceKey() }
+        keyedSourceID = id
+        cancelAutoKey()
+        if let saved = settings.sourceKeys[id] {
+            renderer.update { p in
+                p.keyCbCr = SIMD2(saved.cb, saved.cr); p.keyLuma = saved.luma
+                p.tolerance = saved.tolerance; p.softness = saved.softness
+                if let t = saved.temporal { p.temporal = t }
+                if let e = saved.edge { p.edge = e }
+                if let f = saved.feather { p.feather = f }
+                if let s = saved.spill { p.spill = s }
+            }
+            controls.apply(params: renderer.keyParams)
+            settings.params = renderer.keyParams
+            settings.save()
+        } else {
+            // Let exposure and focus settle on the new source before judging it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                guard let self, keyedSourceID == id, autoAnalyzer == nil else { return }
+                runAutoKey()
+            }
+        }
+    }
+
+    private var currentSourceID: String {
+        settings.cameraID ?? camera.currentDevice?.uniqueID ?? "camera"
+    }
+
+    private func currentSourceKey() -> SourceKey {
+        let p = renderer.keyParams
+        return SourceKey(cb: p.keyCbCr.x, cr: p.keyCbCr.y, luma: p.keyLuma, tolerance: p.tolerance, softness: p.softness,
+                         temporal: p.temporal, edge: p.edge, feather: p.feather, spill: p.spill)
+    }
+
+    private func rememberKeyForSource() {
+        settings.sourceKeys[currentSourceID] = currentSourceKey()
+    }
+
+    /// Pool frames for about a second (or the frozen frame alone), then apply.
+    private func runAutoKey() {
+        cancelAutoKey()
+        let analyzer = AutoKeyAnalyzer()
+        controls.autoRunning = true
+        controls.showKeyHint("Finding the backdrop…")
+        frameLock.lock()
+        let frozen = frozenFrame
+        frameLock.unlock()
+        if let frozen {
+            autoQueue.async { [weak self] in
+                analyzer.add(frozen)
+                DispatchQueue.main.async { self?.finishAutoKey(analyzer) }
+            }
+            return
+        }
+        frameLock.lock()
+        autoAnalyzer = analyzer
+        autoNextSample = 0
+        frameLock.unlock()
+        // Give up if the source stops delivering frames.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, autoAnalyzer === analyzer else { return }
+            frameLock.lock(); autoAnalyzer = nil; frameLock.unlock()
+            autoQueue.async { [weak self] in DispatchQueue.main.async { self?.finishAutoKey(analyzer) } }
+        }
+    }
+
+    private func autoSample(_ frame: CVPixelBuffer, into analyzer: AutoKeyAnalyzer) {
+        analyzer.add(frame)
+        guard analyzer.frameCount >= Self.autoFrames else { return }
+        frameLock.lock()
+        let stillCurrent = autoAnalyzer === analyzer
+        if stillCurrent { autoAnalyzer = nil }
+        frameLock.unlock()
+        if stillCurrent { DispatchQueue.main.async { [weak self] in self?.finishAutoKey(analyzer) } }
+    }
+
+    private func cancelAutoKey() {
+        frameLock.lock(); autoAnalyzer = nil; frameLock.unlock()
+        controls.autoRunning = false
+    }
+
+    private func finishAutoKey(_ analyzer: AutoKeyAnalyzer) {
+        controls.autoRunning = false
+        guard let result = analyzer.result(), result.confidence >= 0.35 else {
+            controls.showKeyHint("Auto couldn't find a plain backdrop around the edge. Click the swatch, then click the backdrop in the preview.", for: 8)
+            return
+        }
+        renderer.update { p in
+            p.keyCbCr = result.keyCbCr; p.keyLuma = result.keyLuma
+            p.tolerance = result.tolerance; p.softness = result.softness
+            p.edge = result.edge; p.feather = result.feather; p.spill = result.spill
+        }
+        controls.apply(params: renderer.keyParams)
+        paramsChanged()
+        let pct = Int((result.edgeCoverage * 100).rounded())
+        let text = String(format: "Auto: %@ backdrop, %d%% of the edge keyed. Shrink %.1f, Blur %.1f, Desaturate %d.",
+                          result.colorName, pct, result.edge, result.feather, Int((result.spill * 100).rounded()))
+        controls.showKeyHint(text, for: 8)
+    }
+
+    /// Mirror the preview only for live cameras, where it should behave like a
+    /// mirror. Movies and the test pattern show as recorded. The output is never mirrored.
+    private func updatePreviewMirror() {
+        let liveCamera = !camera.usingTestPattern && camera.currentVideoURL == nil
+        let mirrored = settings.mirrorPreview && liveCamera
+        preview.mirrored = mirrored
+        controls.mirrorOffsetPad = mirrored
+        background.previewMirrored = mirrored
+        foreground.previewMirrored = mirrored
+    }
+
+    /// The bundled green screen clip, offered as a source.
+    static let sampleSourceID = "sample"
+    static let sampleVideoURL = Bundle.main.url(forResource: "Sample", withExtension: "mp4")
+
     /// 15 Hz with a detection every fourth tracked frame, or 30 Hz with one every other.
     private func applyTrackingRate() {
         renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
@@ -548,6 +737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Slider drags fire many times a second; write once they settle.
     private func paramsChanged() {
         settings.params = renderer.keyParams
+        rememberKeyForSource()
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in self?.settings.save() }
     }
@@ -557,9 +747,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func setMirrorPreview(_ on: Bool) {
         settings.mirrorPreview = on
         settings.save()
-        preview.mirrored = on
-        controls.mirrorOffsetPad = on
         controls.mirrorPreview = on
+        updatePreviewMirror()
     }
 
     @objc private func toggleKeepOnTop() {
@@ -749,14 +938,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.camera.start(device: device)
             self?.settings.cameraID = device.uniqueID
             self?.settings.save()
+            self?.updatePreviewMirror()
+            self?.sourceDidChange()
         }
         controls.onChooseVideo = { [weak self] in self?.chooseVideo() }
         controls.onAutoKey = { [weak self] in
             guard let self else { return }
             endKeyPick()
-            renderer.autoKey()
-            controls.apply(params: renderer.keyParams)
-            paramsChanged()
+            runAutoKey()
         }
         controls.onMirrorPreview = { [weak self] on in self?.setMirrorPreview(on) }
         controls.onShadowFollowsFace = { [weak self] on in
@@ -783,10 +972,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             renderer.trackingEnabled = on
             if !on { preview.showFace(nil) }
         }
+        controls.onSampleSelected = { [weak self] in
+            guard let self else { return }
+            settings.cameraID = Self.sampleSourceID
+            settings.save()
+            devicesChanged()
+        }
         controls.onTestPatternSelected = { [weak self] in
             self?.camera.startTestPattern()
             self?.settings.cameraID = TestPatternSource.id
             self?.settings.save()
+            self?.updatePreviewMirror()
+            self?.sourceDidChange()
         }
         controls.onSupersample = { [weak self] on in
             guard let self else { return }
