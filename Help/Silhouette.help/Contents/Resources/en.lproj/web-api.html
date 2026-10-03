@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Web page API</title>
+<meta name="description" content="How a web page background receives face tracking data from Silhouette.">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<a name="web-api"></a>
+<h1>Web page API</h1>
+<p class="lede">Any web page used as a background can react to the tracked face. Silhouette injects a small object, <code>window.silhouette</code>, into every frame of the page before the page's own scripts run.</p>
+<h2>Subscribing</h2>
+<pre><code>silhouette.on('face', face =&gt; { /* called about 15 times a second */ });
+console.log(silhouette.face);   // the most recent face object, or null</code></pre>
+<p>Events arrive only while <b>Track face and eyes</b> is on and the page is the active background.</p>
+<h2>The face object</h2>
+<p>All coordinates are normalised to the output frame (0…1), origin top-left, in the unmirrored image the virtual camera sends. Angles are in degrees. Keys for values that could not be measured are absent, so use optional chaining.</p>
+<table>
+<tr><th>Key</th><th>Meaning</th></tr>
+<tr><td><code>t</code></td><td>Timestamp in seconds (monotonic)</td></tr>
+<tr><td><code>detected</code></td><td><code>false</code> when no face is in frame; the other keys are then absent</td></tr>
+<tr><td><code>box</code></td><td><code>{x, y, w, h}</code> face bounding box</td></tr>
+<tr><td><code>center</code></td><td><code>{x, y}</code> centre of the box</td></tr>
+<tr><td><code>yaw</code>, <code>pitch</code>, <code>roll</code></td><td>Head pose. Yaw is negative when turned to the image's left</td></tr>
+<tr><td><code>leftEye</code>, <code>rightEye</code></td><td><code>{x, y, open}</code>; left and right as seen in the image. <code>x, y</code> is the pupil when available. <code>open</code> is the eye's height ÷ width: about 0.3 open, under 0.18 closed</td></tr>
+<tr><td><code>nose</code></td><td><code>{x, y}</code> nose centre</td></tr>
+<tr><td><code>mouth</code></td><td><code>{x, y, open}</code> inner-lip centre and height ÷ width</td></tr>
+<tr><td><code>distance</code></td><td>Estimated metres from the camera, from eye separation. Assumes a 63 mm interpupillary distance and a 70° horizontal field of view, so treat it as relative</td></tr>
+<tr><td><code>position</code></td><td><code>{x, y, z}</code> head centre in camera space, metres: x right, y up, z away from the camera</td></tr>
+<tr><td><code>pose</code></td><td>Column-major 4×4 matrix: rotation from yaw, pitch and roll, plus <code>position</code>. Forward, toward the camera, is <code>pose × (0, 0, −1, 0)</code></td></tr>
+<tr><td><code>projection</code></td><td>Column-major 4×4 perspective matrix for the assumed camera (16:9, near 0.1 m, far 10 m). <code>projection × pose × point</code> is clip space</td></tr>
+<tr><td><code>contours</code></td><td>Landmark polylines, each an array of <code>{x, y}</code>: <code>faceContour, leftEyebrow, rightEyebrow, noseCrest, nose, leftEye, rightEye, outerLips, innerLips, medianLine</code></td></tr>
+</table>
+<h2>How the page reaches the output</h2>
+<p>The page renders in a hidden 1920×1080 web view. Silhouette snapshots it about 15 times a second while its pixels change and backs off to 3 a second when they don't, then uses the snapshot as the layer behind the keyed person. Expect roughly 70–100 ms between a face event and the matching pixels in the output.</p>
+<h2>Writing a page</h2>
+<ul>
+<li>The page is the background, so the person covers its centre. Put readouts near the edges, or draw things meant to sit behind the head, like the plane in the bundled test page.</li>
+<li>The output is not mirrored, but Silhouette's preview is. Text that should read correctly in the preview needs <code>transform: scaleX(-1)</code>; text for the people on the call should not be mirrored.</li>
+<li>Snapshots cost WebKit GPU time. Avoid <code>backdrop-filter</code>, continuous CSS transitions, and animation loops; move things only when a face event arrives.</li>
+<li>The bundled <b>Test page</b> is the reference example.</li>
+</ul>
+<a class="back" href="index.html">‹ Silhouette Help</a>
+</body></html>

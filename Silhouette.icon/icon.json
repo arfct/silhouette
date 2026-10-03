@@ -1,0 +1,47 @@
+{
+  "features" : [
+    "specular-location"
+  ],
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.00000,1.00000,0.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "blur-material" : 1,
+      "layers" : [
+        {
+          "image-name" : "silhouette-mark.svg",
+          "name" : "silhouette-mark",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.950000000000045,
+              64
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "refractivity" : {
+        "depth" : 0.10093322753906236,
+        "enabled" : false,
+        "strength" : 0.001741943359375
+      },
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.5
+      },
+      "specular" : "inside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.6
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

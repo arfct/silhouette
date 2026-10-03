@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Controls</title>
+<meta name="description" content="What every control in the sidebar does.">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<a name="controls"></a>
+<h1>Controls</h1>
+<p class="lede">Every slider shows its value on the right. Click the value to type a number, or step it with <kbd>↑</kbd> and <kbd>↓</kbd> (<kbd>⇧</kbd> for ten times the step). Press <kbd>⌘K</kbd> to hide or show the sidebar.</p>
+<h2>Camera</h2>
+<table>
+<tr><th>4K keying</th><td>Captures at 3840×2160 when the camera supports it, keys at that size, and downsamples to the 1080p output. Finer hair and edges with a 4K camera, about four times the GPU work.</td></tr>
+<tr><th>Mirror</th><td>Mirrors the preview like a mirror. The virtual camera output is never mirrored.</td></tr>
+</table>
+<p>The frames-per-second and GPU-time readout sits at the top right of the window, above the preview.</p>
+<h2>Chromakey</h2>
+<p>Pixel values here are measured on the 1920×1080 output, so a setting means the same thing with a 720p, 1080p, or 4K source.</p>
+<p>Key colour and matte controls share one group. Click the triangle in its header to show or hide the sliders; the colour swatch, Auto, and the on/off switch stay visible. With the switch off the camera passes through untouched, and the key and Shadow controls dim because they have nothing to act on.</p>
+<table>
+<tr><th>Colour</th><td>The backdrop colour. Click the swatch to see the unkeyed image, then click the backdrop in the preview; <b>Auto</b> samples the frame edges.</td></tr>
+<tr><th>Color Range</th><td>Two values, in percent of the full chroma span. Left: how close a colour must be to the key to be fully removed. Right: where the transition to opaque ends. Typical keys sit between 5 and 20. The slider runs to 30; typing or arrowing in the fields can go further. The bar shows the colours along that axis, from the key through neutral toward its complement, and the thumbs take the colour they sit on.</td></tr>
+<tr><th>Shrink</th><td>Pulls the matte edge in by this many pixels to trim fringes.</td></tr>
+<tr><th>Blur</th><td>Softens the matte edge, in pixels.</td></tr>
+<tr><th>Desaturate</th><td>Removes the backdrop's tint reflected onto the subject, in percent.</td></tr>
+<tr><th>Stabilize</th><td>Blends the matte with the previous frame where the picture is static, which stops edge flicker from sensor noise. Percent of the previous frame kept; movement passes straight through.</td></tr>
+</table>
+<h2>Shadow</h2>
+<p>The switch in the header turns the shadow on or off. The controls stay in place, dimmed, while it is off.</p>
+<table>
+<tr><th>Opacity</th><td>Strength of the drop shadow behind the subject, in percent.</td></tr>
+<tr><th>Size</th><td>How far the shadow spreads, in output pixels. Larger is softer and fainter at the edge.</td></tr>
+<tr><th>Offset</th><td>Drag the dot to position the shadow; double-click to reset. The value is in percent of the frame, x then y.</td></tr>
+<tr><th>Vary with distance</th><td>Scales the shadow with the tracked face: nearer gives a longer, softer, lighter shadow; farther a shorter, sharper, denser one. See <a href="tracking.html">Face tracking and the shadow</a>.</td></tr>
+</table>
+<h2>Face tracking</h2>
+<p>The switch in the header runs face tracking on the Neural Engine. Web pages receive pose, eye, distance and landmark data, see <a href="web-api.html">Web page API</a>, and the shadow's Vary with distance uses the face size. Turning on Vary with distance turns tracking on.</p>
+<p><b>Show on preview</b> draws what the tracker knows over the preview, never in the output: landmark contours and pupils. Pose, distance, and the pose matrix go to web pages through the <a href="web-api.html">Web page API</a>; the distance assumes a 63 mm eye separation and a 70° field of view, so it is a relative figure.</p>
+<p><b>High frame rate</b> tracks every frame, 30 times a second, with a face detection every other frame. Off, it tracks every second frame with a detection every fourth. On costs about twice the Neural Engine work and gives smoother pose and eye data.</p>
+<a class="back" href="index.html">‹ Silhouette Help</a>
+</body></html>

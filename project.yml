@@ -1,0 +1,97 @@
+name: Silhouette
+options:
+  bundleIdPrefix: com.artifact
+  fileTypes:
+    icon:
+      file: true
+      buildPhase: resources
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: TVA9Z8LD95
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "57"
+targets:
+  Silhouette:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Shared
+      - Demo
+      - Assets.xcassets
+      - Silhouette.icon
+      - path: Help/Silhouette.help
+        type: folder
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Silhouette
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        LSApplicationCategoryType: public.app-category.video
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: Silhouette keys your camera against a real green screen and sends the result to the Silhouette virtual camera.
+        NSSystemExtensionUsageDescription: The Silhouette camera extension provides the virtual camera that Zoom, FaceTime, and other apps see.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        CFBundleHelpBookFolder: Silhouette.help
+        CFBundleHelpBookName: com.artifact.Silhouette.help
+    entitlements:
+      path: App/Silhouette.entitlements
+      properties:
+        com.apple.developer.system-extension.install: true
+        com.apple.security.app-sandbox: true
+        com.apple.security.device.camera: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-only: true
+        com.apple.security.files.bookmarks.app-scope: true
+    dependencies:
+      - target: SilhouetteCamera
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.artifact.Silhouette
+        PRODUCT_NAME: Silhouette
+        ASSETCATALOG_COMPILER_APPICON_NAME: Silhouette
+      configs:
+        # Local test builds are a separate app to TCC, so they never make the
+        # installed app ask for camera access again.
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.artifact.Silhouette.dev
+  SilhouetteCamera:
+    type: system-extension
+    platform: macOS
+    sources: [Extension, Shared]
+    info:
+      path: Extension/Info.plist
+      properties:
+        CFBundlePackageType: SYSX
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleDisplayName: Silhouette Camera
+        NSSystemExtensionUsageDescription: Silhouette's camera extension provides the virtual camera that Zoom, FaceTime, and other apps see.
+        CMIOExtension:
+          CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
+    entitlements:
+      path: Extension/SilhouetteCamera.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - $(TeamIdentifierPrefix)com.artifact.Silhouette
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.artifact.Silhouette.Camera
+        PRODUCT_NAME: com.artifact.Silhouette.Camera
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.artifact.Silhouette.dev.Camera
