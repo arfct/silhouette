@@ -7,7 +7,7 @@ permalink: /privacy/
 
 Last updated: 3 October 2026
 
-Silhouette is made by Artifact Creative Foundation. This policy covers the Silhouette app for macOS.
+Silhouette is made by Artifact. This policy covers the Silhouette app for macOS.
 
 ## Summary
 

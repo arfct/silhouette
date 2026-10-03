@@ -143,4 +143,4 @@ Mac App Store requires; Developer ID builds use it too.
 - Web snapshots upload straight into a shared texture, skip when nothing
   changed, and back off to 3 per second while the page is static.
 
-© 2026 Artifact Creative Foundation
+© 2026 Artifact

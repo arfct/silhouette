@@ -65,7 +65,7 @@ Requires a physical green or blue backdrop and macOS 14 or later.
 
 ## Copyright
 
-2026 Artifact Creative Foundation
+2026 Artifact
 
 ## Category
 
