@@ -270,6 +270,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
+    private let autoButton = NSButton(title: "Auto", target: nil, action: nil)
+    private var hintTimer: Timer?
     private let keyRange = RangeSlider()
     private let offsetPad = OffsetPad()
     /// `scale` and `decimals` turn the stored value into what the field shows (percent, pixels).
@@ -384,14 +386,16 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         keySwatch.target = self
         keySwatch.action = #selector(pickKeyTapped)
         keySwatch.toolTip = "The backdrop colour being removed. Click to show the unkeyed image, then click the backdrop in the preview. Esc cancels."
-        let autoButton = NSButton(title: "Auto", target: self, action: #selector(autoKeyTapped)); autoButton.controlSize = .mini
-        autoButton.toolTip = "Sample the backdrop colour from the edges of the frame."
+        autoButton.title = "Auto"; autoButton.target = self; autoButton.action = #selector(autoKeyTapped); autoButton.controlSize = .mini
+        autoButton.toolTip = "Find the backdrop colour and range from the edges of the frame over about a second, avoiding the face and body. Runs by itself when a new source is chosen."
         keySwitch.target = self; keySwitch.action = #selector(keyToggled)
         keySwitch.controlSize = .mini
         keySwitch.toolTip = "Key out the backdrop. Off passes the camera through untouched, so the background and shadow have no effect."
         let keyTools = NSStackView(views: [keySwatch, autoButton, keySwitch]); keyTools.spacing = 8
         self.keyTools = keyTools
         keyHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        keyHint.textColor = .secondaryLabelColor
+        keyHint.preferredMaxLayoutWidth = Self.width - 48
         keyHint.isHidden = true
         keyRange.minValue = 0; keyRange.maxValue = 0.3
         keyRange.onChange = { [weak self] lo, hi in
@@ -405,7 +409,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
             columns([sliderCell("Desaturate", \.spill, 0...1, scale: 100, decimals: 0, tip: "Removes the backdrop's tint reflected onto hair and clothing, in percent."),
                      sliderCell("Stabilize", \.temporal, 0...0.9, scale: 100, decimals: 0, tip: "Blends the matte with the previous frame where the picture is static, to stop edge flicker from sensor noise. Percent of the previous frame kept; movement passes straight through.")]),
-            keyHint,
         ])
         body.orientation = .vertical
         body.alignment = .leading
@@ -417,7 +420,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         chromaDisclosure.target = self
         chromaDisclosure.action = #selector(chromaToggled)
         chromaDisclosure.toolTip = "Show or hide the chromakey controls"
-        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body]))
+        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -923,6 +926,25 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
     }
     @objc private func freezeTapped() { frozen.toggle(); onFreeze?(frozen) }
+
+    /// Auto is running: the button shows it and ignores clicks.
+    var autoRunning: Bool = false {
+        didSet {
+            autoButton.isEnabled = !autoRunning
+            autoButton.title = autoRunning ? "Auto…" : "Auto"
+        }
+    }
+
+    /// A line under the Chromakey controls, cleared after `seconds` (nil keeps it).
+    func showKeyHint(_ text: String?, for seconds: TimeInterval? = nil) {
+        hintTimer?.invalidate(); hintTimer = nil
+        guard let text else { keyHint.isHidden = true; return }
+        keyHint.stringValue = text
+        keyHint.isHidden = false
+        if let seconds {
+            hintTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in self?.keyHint.isHidden = true }
+        }
+    }
 
     @objc private func mirrorChanged() { onMirrorPreview?(mirrorSwitch.state == .on) }
 

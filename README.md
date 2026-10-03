@@ -49,7 +49,11 @@ virtual camera is only installed from `/Applications`.
 
 ### Use
 
-- Click the colour swatch, then click the backdrop in the preview to pick
+- Auto runs when a source is first chosen: it pools a few frames, finds the
+  dominant colour around the frame edge (skipping the face and the body
+  under it), sets Color Range so the edge is removed and the face is kept,
+  and raises Stabilize for noisy sources. Each source remembers its key.
+- Or click the colour swatch, then click the backdrop in the preview to pick
   the key colour. The preview shows the unkeyed image while picking.
 - Any movie file works as the camera: Source → Video file…, or drop one on
   the window. The last ten movies stay in the Source menu. It loops, decodes in hardware, and 4K files run the full path.
