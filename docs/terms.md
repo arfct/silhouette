@@ -1,3 +1,8 @@
+---
+title: Silhouette terms of use
+permalink: /terms/
+---
+
 # Silhouette terms of use
 
 Last updated: 3 October 2026

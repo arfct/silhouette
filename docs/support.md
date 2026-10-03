@@ -1,3 +1,8 @@
+---
+title: Silhouette support
+permalink: /support/
+---
+
 # Silhouette support
 
 ## Get help

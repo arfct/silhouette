@@ -1,3 +1,8 @@
+---
+title: Silhouette web page API
+permalink: /web-api/
+---
+
 # Silhouette web page API
 
 Any web page used as a background can react to the tracked face. The app
