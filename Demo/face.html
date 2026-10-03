@@ -6,11 +6,9 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; font: 28px/1.35 -apple-system, system-ui, sans-serif; color: #f2f2f2; }
-  #grid { position: absolute; inset: -200px; background-image: radial-gradient(circle, rgba(255,255,255,.22) 1.5px, transparent 2px); background-size: 48px 48px; }
-  /* A plane behind the head that follows yaw, pitch, and roll. */
+  /* An ellipse fitted to the face box that follows yaw, pitch, and roll. */
   #plane-wrap { position: absolute; transform: translate(-50%, -50%); perspective: 900px; }
-  #plane { width: 100%; height: 100%; border: 3px solid rgba(255,255,255,.85); background: rgba(255,255,255,.14); border-radius: 12px; box-sizing: border-box; }
-  #plane::after { content: "face"; position: absolute; left: 14px; top: 8px; font-size: 22px; color: rgba(255,255,255,.9); }
+  #plane { width: 100%; height: 100%; border: 3px solid rgba(255,255,255,.85); background: rgba(255,255,255,.14); border-radius: 50%; box-sizing: border-box; }
   .eye { position: absolute; width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; background: rgba(255,255,255,.25); transform: translate(-50%, -50%); }
   .eye.closed { height: 4px; border-radius: 4px; }
   /* Mirrored so it reads correctly in the (mirrored) preview. */
@@ -23,7 +21,6 @@
 </style>
 </head>
 <body>
-<div id="grid"></div>
 <div id="plane-wrap" style="left:50%;top:50%;width:0;height:0"><div id="plane"></div></div>
 <div id="eyeL" class="eye" hidden></div>
 <div id="eyeR" class="eye" hidden></div>
@@ -54,8 +51,9 @@
     $('nodata').hidden = f.detected;
     const wrap = $('plane-wrap');
     if (!f.detected) { wrap.style.width = wrap.style.height = '0px'; $('eyeL').hidden = $('eyeR').hidden = true; return; }
-    const cx = f.center.x * W, cy = f.center.y * H, size = Math.max(f.box.w * W, f.box.h * H) * 1.7;
-    wrap.style.left = cx + 'px'; wrap.style.top = cy + 'px'; wrap.style.width = wrap.style.height = size + 'px';
+    // The ellipse fills the face box, padded a little so it rings the head.
+    const cx = f.center.x * W, cy = f.center.y * H, w = f.box.w * W * 1.25, h = f.box.h * H * 1.45;
+    wrap.style.left = cx + 'px'; wrap.style.top = cy + 'px'; wrap.style.width = w + 'px'; wrap.style.height = h + 'px';
     $('plane').style.transform = `rotateY(${-(f.yaw || 0)}deg) rotateX(${f.pitch || 0}deg) rotateZ(${-(f.roll || 0)}deg)`;
     for (const [id, eye] of [['eyeL', f.leftEye], ['eyeR', f.rightEye]]) {
       const el = $(id); el.hidden = !eye; if (!eye) continue;

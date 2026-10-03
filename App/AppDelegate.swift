@@ -124,6 +124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var sidebarItem: NSSplitViewItem!
     private var sidebarObservation: NSKeyValueObservation?
     private var previewLeading: NSLayoutConstraint!
+    /// Freeze frame: the newest camera frame, and the one being held while frozen.
+    private let frameLock = NSLock()
+    private var latestFrame: CVPixelBuffer?
+    private var frozenFrame: CVPixelBuffer?
+    private var freezeTimer: DispatchSourceTimer?
+    private let freezeQueue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).freeze", qos: .userInteractive)
     /// fps and GPU time, in the title area above the preview.
     private let statsLabel = NSTextField(labelWithString: "")
     private let renderer = Renderer()
@@ -160,7 +166,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         camera.preferHighResolution = settings.supersample
         controls.supersample = settings.supersample
         renderer.onOutput = { [weak self] buffer in self?.handleOutput(buffer) }
-        camera.onFrame = { [weak self] pixelBuffer in self?.renderer.render(pixelBuffer) }
+        camera.onFrame = { [weak self] pixelBuffer in
+            guard let self else { return }
+            frameLock.lock()
+            let frozen = frozenFrame != nil
+            if !frozen { latestFrame = pixelBuffer }
+            frameLock.unlock()
+            if !frozen { renderer.render(pixelBuffer) }   // frozen: the timer renders the held frame
+        }
+        controls.onFreeze = { [weak self] on in self?.setFrozen(on) }
         renderer.onTrackingFrame = { [weak self] small in
             guard let self else { return }
             let m = renderer.cameraMapping
@@ -333,6 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func devicesChanged() {
+        if controls.frozen { setFrozen(false) }   // a new source means live video again
         let devices = Camera.availableDevices()
         let id = settings.cameraID ?? ""
         if id.hasPrefix(VideoFileSource.prefix) {
@@ -521,6 +536,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // MARK: Params
+
+    /// Hold the newest frame and keep rendering it at the output rate, so key and
+    /// shadow changes show immediately and the virtual camera never stalls.
+    private func setFrozen(_ on: Bool) {
+        frameLock.lock()
+        frozenFrame = on ? latestFrame : nil
+        let holding = frozenFrame != nil
+        frameLock.unlock()
+        freezeTimer?.cancel()
+        freezeTimer = nil
+        controls.frozen = holding
+        guard holding else { return }
+        let timer = DispatchSource.makeTimerSource(queue: freezeQueue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(VirtualCameraConstants.frameRate))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            frameLock.lock(); let frame = frozenFrame; frameLock.unlock()
+            if let frame { renderer.render(frame) }
+        }
+        freezeTimer = timer
+        timer.resume()
+    }
 
     /// 15 Hz with a detection every fourth tracked frame, or 30 Hz with one every other.
     private func applyTrackingRate() {

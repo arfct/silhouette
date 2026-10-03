@@ -220,6 +220,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onMirrorPreview: ((Bool) -> Void)?
     var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
+    /// True freezes the current frame for tuning; false goes back to live video.
+    var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
     var onSupersample: ((Bool) -> Void)?
     /// Layer combo boxes: what the user committed, for the background or the foreground.
@@ -244,6 +246,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let supersampleSwitch = NSSwitch()
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
+    private let freezeButton = NSButton(title: "", target: nil, action: nil)
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
     private var highRateRow: NSView!
@@ -341,7 +344,13 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         ])
         toggles.spacing = 14
         toggles.distribution = .equalSpacing
-        stack.addArrangedSubview(group("Source", trailing: nil, rows: [cameraPopup, toggles]))
+        freezeButton.bezelStyle = .accessoryBarAction
+        freezeButton.isBordered = false
+        freezeButton.imagePosition = .imageOnly
+        freezeButton.target = self
+        freezeButton.action = #selector(freezeTapped)
+        frozen = false
+        stack.addArrangedSubview(group("Source", trailing: freezeButton, rows: [cameraPopup, toggles]))
 
         // Layers: one combo box each for the background (behind the keyed camera)
         // and the foreground (over it). None, the test page, recent URLs, files and
@@ -896,6 +905,19 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         set { overlaySwitch.state = newValue ? .on : .off }
     }
     @objc private func overlayChanged() { onFaceOverlay?(overlaySwitch.state == .on) }
+    /// Pause shows while live; play shows while frozen.
+    var frozen: Bool = false {
+        didSet {
+            let name = frozen ? "play.fill" : "pause.fill"
+            freezeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: frozen ? "Resume live video" : "Freeze frame")
+            freezeButton.contentTintColor = frozen ? .controlAccentColor : .secondaryLabelColor
+            freezeButton.toolTip = frozen
+                ? "Frozen on one frame. Click to go back to live video."
+                : "Freeze the current frame so you can tune the key without movement. The virtual camera shows the frozen frame until you resume."
+        }
+    }
+    @objc private func freezeTapped() { frozen.toggle(); onFreeze?(frozen) }
+
     @objc private func mirrorChanged() { onMirrorPreview?(mirrorSwitch.state == .on) }
 
     @objc private func connectedTapped() {
