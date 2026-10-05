@@ -946,7 +946,13 @@ final class ControlsView: NSView, NSComboBoxDelegate {
             keyRangeCell.isHidden = person
             keySwatch.isHidden = person
             autoButton.isHidden = person
-            cells[\.spill]?.cell.isHidden = person   // spill suppression is a chroma idea
+            if let spill = cells[\.spill]?.cell {   // same slider, different job per mode
+                spill.label.stringValue = person ? "Decontaminate" : "Desaturate"
+                let tip = person
+                    ? "Removes the background colour mixed into the subject's edge pixels, in percent. Hair and soft edges stop carrying the room's colour."
+                    : "Removes the backdrop's tint reflected onto hair and clothing, in percent."
+                spill.toolTip = tip; spill.label.toolTip = tip; spill.value.toolTip = tip; spill.control.toolTip = tip
+            }
         }
     }
     @objc private func matteChanged() { matteSource = matteControl.selectedSegment; onMatteSource?(matteControl.selectedSegment) }

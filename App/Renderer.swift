@@ -114,9 +114,13 @@ final class Renderer {
     /// Guided-filter upsample of the person mask, at half the camera resolution.
     private var guidedPrepPipeline: MTLComputePipelineState!
     private var guidedCoefficientsPipeline: MTLComputePipelineState!
-    private var guideTextures: (prep: MTLTexture, means: MTLTexture, ab: MTLTexture, meansAB: MTLTexture)?
-    private var guideBox4: MPSImageBox?
-    private var guideBox2: MPSImageBox?
+    /// Work-resolution textures: four gathered products and their means, the
+    /// background estimate and its mean, and the coefficients and their mean.
+    private var guideTextures: (prep: [MTLTexture], means: [MTLTexture], bgPrep: MTLTexture, bgMeans: MTLTexture, ab: MTLTexture, meansAB: MTLTexture, wide: [MTLTexture])?
+    private var guideBox: MPSImageBox?
+    /// A wider box for the trimap band: about 40 px at 1080p.
+    private var wideBox: MPSImageBox?
+    private static let wideRadius = 10
     /// Box radius in work-resolution pixels (about 8 px at 1080p) and the filter's regularisation.
     private static let guideRadius = 3
     private static let guideEpsilon: Float = 0.001
@@ -244,45 +248,59 @@ final class Renderer {
 
     /// (Re)allocate the processing-resolution textures when the scale changes.
     /// Called from the render thread only.
-    /// Four passes at half camera resolution: gather, box filter, coefficients,
-    /// box filter. Returns the averaged (a, b) texture the matte pass applies.
-    private func encodeGuidedUpsample(_ cmd: MTLCommandBuffer, luma: MTLTexture, mask: MTLTexture, camW: Int, camH: Int) -> MTLTexture {
+    /// Colour guided filter at half camera resolution: gather, five box filters,
+    /// coefficients, one more box filter. Returns the averaged (a, b) texture
+    /// the matte pass applies and the local background colour estimate.
+    private func encodeGuidedUpsample(_ cmd: MTLCommandBuffer, luma: MTLTexture, chroma: MTLTexture, mask: MTLTexture,
+                                      params: KeyParams, camW: Int, camH: Int) -> (MTLTexture, MTLTexture, [MTLTexture]) {
         let w = max(camW / 2, 1), h = max(camH / 2, 1)
-        if guideTextures == nil || guideTextures!.prep.width != w || guideTextures!.prep.height != h {
-            func make(_ format: MTLPixelFormat) -> MTLTexture {
-                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+        if guideTextures == nil || guideTextures!.ab.width != w || guideTextures!.ab.height != h {
+            func make() -> MTLTexture {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
                 d.storageMode = .private
                 d.usage = [.shaderRead, .shaderWrite]
                 return device.makeTexture(descriptor: d)!
             }
-            guideTextures = (make(.rgba16Float), make(.rgba16Float), make(.rg16Float), make(.rg16Float))
+            guideTextures = ((0..<4).map { _ in make() }, (0..<4).map { _ in make() }, make(), make(), make(), make(), (0..<4).map { _ in make() })
             let side = 2 * Self.guideRadius + 1
-            guideBox4 = MPSImageBox(device: device, kernelWidth: side, kernelHeight: side)
-            guideBox4?.edgeMode = .clamp
-            guideBox2 = MPSImageBox(device: device, kernelWidth: side, kernelHeight: side)
-            guideBox2?.edgeMode = .clamp
+            guideBox = MPSImageBox(device: device, kernelWidth: side, kernelHeight: side)
+            guideBox?.edgeMode = .clamp
+            let wideSide = 2 * Self.wideRadius + 1
+            wideBox = MPSImageBox(device: device, kernelWidth: wideSide, kernelHeight: wideSide)
+            wideBox?.edgeMode = .clamp
         }
-        guard let t = guideTextures, let box4 = guideBox4, let box2 = guideBox2 else { return dummyBackground }
+        guard let t = guideTextures, let box = guideBox, let wide = wideBox else { return (dummyBackground, dummyBackground, Array(repeating: dummyBackground, count: 4)) }
         let grid = MTLSize(width: w, height: h, depth: 1)
         let group = MTLSize(width: 16, height: 16, depth: 1)
         var epsilon = Self.guideEpsilon
+        var p = params
 
         if let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(guidedPrepPipeline)
-            enc.setTexture(luma, index: 0); enc.setTexture(mask, index: 1); enc.setTexture(t.prep, index: 2)
+            enc.setTexture(luma, index: 0); enc.setTexture(chroma, index: 1); enc.setTexture(mask, index: 2)
+            for i in 0..<4 { enc.setTexture(t.prep[i], index: 3 + i) }
+            enc.setTexture(t.bgPrep, index: 7)
+            enc.setBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
             enc.dispatchThreads(grid, threadsPerThreadgroup: group)
             enc.endEncoding()
         }
-        box4.encode(commandBuffer: cmd, sourceTexture: t.prep, destinationTexture: t.means)
+        for i in 0..<4 { box.encode(commandBuffer: cmd, sourceTexture: t.prep[i], destinationTexture: t.means[i]) }
+        box.encode(commandBuffer: cmd, sourceTexture: t.bgPrep, destinationTexture: t.bgMeans)
         if let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(guidedCoefficientsPipeline)
-            enc.setTexture(t.means, index: 0); enc.setTexture(t.ab, index: 1)
+            for i in 0..<4 { enc.setTexture(t.means[i], index: i) }
+            enc.setTexture(t.ab, index: 4)
             enc.setBytes(&epsilon, length: MemoryLayout<Float>.size, index: 0)
             enc.dispatchThreads(grid, threadsPerThreadgroup: group)
             enc.endEncoding()
         }
-        box2.encode(commandBuffer: cmd, sourceTexture: t.ab, destinationTexture: t.meansAB)
-        return t.meansAB
+        box.encode(commandBuffer: cmd, sourceTexture: t.ab, destinationTexture: t.meansAB)
+        // Wide means for the trimap band: guide and mask, the mask-weighted guide, and the background estimate.
+        wide.encode(commandBuffer: cmd, sourceTexture: t.prep[0], destinationTexture: t.wide[0])
+        wide.encode(commandBuffer: cmd, sourceTexture: t.prep[2], destinationTexture: t.wide[1])
+        wide.encode(commandBuffer: cmd, sourceTexture: t.prep[3], destinationTexture: t.wide[2])
+        wide.encode(commandBuffer: cmd, sourceTexture: t.bgPrep, destinationTexture: t.wide[3])
+        return (t.meansAB, t.bgMeans, t.wide)
     }
 
     private func ensureProcessTextures() {
@@ -419,10 +437,13 @@ final class Renderer {
         ensureProcessTextures()
         guard let cmd = commandQueue.makeCommandBuffer() else { return }
 
-        // Guided-filter upsample of the person mask against this frame's luma.
+        // Guided-filter upsample of the person mask against this frame's colour,
+        // plus a local background colour estimate for edge decontamination.
         var guideTexture: MTLTexture = dummyBackground
+        var backgroundEstimate: MTLTexture = dummyBackground
+        var wideTextures: [MTLTexture] = Array(repeating: dummyBackground, count: 4)
         if p.personMode > 0.5 {
-            guideTexture = encodeGuidedUpsample(cmd, luma: luma.texture, mask: maskTexture, camW: camW, camH: camH)
+            (guideTexture, backgroundEstimate, wideTextures) = encodeGuidedUpsample(cmd, luma: luma.texture, chroma: chroma.texture, mask: maskTexture, params: p, camW: camW, camH: camH)
         }
 
         // Previous frame's luma for motion detection in the temporal blend.
@@ -447,6 +468,7 @@ final class Renderer {
             menc.setFragmentTexture(prevLuma?.texture ?? dummyBackground, index: 5)
             menc.setFragmentTexture(maskTexture, index: 6)
             menc.setFragmentTexture(guideTexture, index: 7)
+            for (i, t) in wideTextures.enumerated() { menc.setFragmentTexture(t, index: 8 + i) }
             menc.setFragmentBytes(&mp, length: MemoryLayout<KeyParams>.stride, index: 0)
             menc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             menc.endEncoding()
@@ -506,6 +528,7 @@ final class Renderer {
         enc.setFragmentTexture(shadowSource, index: 3)
         enc.setFragmentTexture(matteSource, index: 4)
         enc.setFragmentTexture(fg ?? dummyBackground, index: 5)
+        enc.setFragmentTexture(backgroundEstimate, index: 6)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
