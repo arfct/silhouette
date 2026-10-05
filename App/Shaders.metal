@@ -23,6 +23,7 @@ struct KeyParams {
     float2 fgScale;        // output uv -> foreground uv (aspect fill)
     float2 fgOffset;
     float  hasForeground;  // 1 = composite fgTex (premultiplied) over everything
+    float  personMode;     // 1 = the matte comes from maskTex (person segmentation), not chroma
 };
 
 struct VSOut {
@@ -66,6 +67,47 @@ static inline float computeMatte(float2 cuv, float2 cbcr, texture2d<float> chrom
     return a;
 }
 
+// Refined person alpha at a camera uv from the guided-filter coefficients.
+static inline float personAlpha(float2 cuv, texture2d<float> lumaTex, texture2d<float> guideTex, sampler s) {
+    float2 ab = guideTex.sample(s, cuv).rg;
+    float a = saturate(ab.x * lumaTex.sample(s, cuv).r + ab.y);
+    // The model's transition band is several pixels of mid-grey; firm it up so the
+    // edge is a narrow ramp rather than a halo, keeping some softness for hair.
+    return smoothstep(0.3, 0.7, a);
+}
+
+// Guided filter, step 1: at the work resolution gather (I, p, I*I, I*p) where I is
+// luma and p the coarse mask, both sampled bilinearly. A box filter then turns
+// these into local means.
+kernel void guidedPrep(texture2d<float> lumaTex [[texture(0)]],
+                       texture2d<float> maskTex [[texture(1)]],
+                       texture2d<float, access::write> out [[texture(2)]],
+                       uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(out.get_width(), out.get_height());
+    float I = lumaTex.sample(s, uv).r;
+    float p = maskTex.sample(s, uv).r;
+    out.write(float4(I, p, I * I, I * p), gid);
+}
+
+// Guided filter, step 2: per-pixel linear coefficients a and b from the local
+// means; a second box filter averages them before the matte pass applies them.
+kernel void guidedCoefficients(texture2d<float> means [[texture(0)]],
+                               texture2d<float, access::write> out [[texture(1)]],
+                               constant float &epsilon [[buffer(0)]],
+                               uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    float4 m = means.read(gid);   // mean I, mean p, mean I*I, mean I*p
+    float varI = max(m.z - m.x * m.x, 0.0);
+    float covIp = m.w - m.x * m.y;
+    float a = covIp / (varI + epsilon);
+    float b = m.y - a * m.x;
+    out.write(float4(a, b, 0.0, 0.0), gid);
+}
+
 // Matte pass. Runs at full resolution for the key (with temporal blending
 // against the previous frame) and at quarter resolution for the shadow.
 // Chroma is prefiltered with four diagonal taps so sensor noise does not
@@ -75,6 +117,8 @@ fragment float4 mattePass(VSOut in [[stage_in]],
                           texture2d<float> chromaTex [[texture(1)]],
                           texture2d<float> prevMatte [[texture(4)]],
                           texture2d<float> prevLuma  [[texture(5)]],
+                          texture2d<float> maskTex   [[texture(6)]],
+                          texture2d<float> guideTex  [[texture(7)]],
                           constant KeyParams &P      [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
@@ -84,12 +128,27 @@ fragment float4 mattePass(VSOut in [[stage_in]],
     float2 fuv = (in.uv - P.shadowPad) / (1.0 - 2.0 * P.shadowPad);
     float2 cuv = fuv * P.camScale + P.camOffset;
 
-    float2 d = P.chromaTexel * 0.75;
-    float2 cbcr = 0.25 * (chromaTex.sample(s, cuv + float2( d.x,  d.y)).rg +
-                          chromaTex.sample(s, cuv + float2(-d.x,  d.y)).rg +
-                          chromaTex.sample(s, cuv + float2( d.x, -d.y)).rg +
-                          chromaTex.sample(s, cuv + float2(-d.x, -d.y)).rg);
-    float a = computeMatte(cuv, fullRangeChroma(cbcr, P), chromaTex, s, P);
+    float a;
+    if (P.personMode > 0.5) {
+        // Guided-filter upsample of the coarse person mask: alpha = meanA * luma + meanB,
+        // with the coefficients box-filtered at the work resolution. Edges land on
+        // the image's own edges rather than the mask's blocks. Shrink erodes it.
+        a = personAlpha(cuv, lumaTex, guideTex, s);
+        if (P.edge > 0.0) {
+            float2 e = P.chromaTexel * P.edge;
+            a = min(a, personAlpha(cuv + float2( e.x, 0.0), lumaTex, guideTex, s));
+            a = min(a, personAlpha(cuv + float2(-e.x, 0.0), lumaTex, guideTex, s));
+            a = min(a, personAlpha(cuv + float2(0.0,  e.y), lumaTex, guideTex, s));
+            a = min(a, personAlpha(cuv + float2(0.0, -e.y), lumaTex, guideTex, s));
+        }
+    } else {
+        float2 d = P.chromaTexel * 0.75;
+        float2 cbcr = 0.25 * (chromaTex.sample(s, cuv + float2( d.x,  d.y)).rg +
+                              chromaTex.sample(s, cuv + float2(-d.x,  d.y)).rg +
+                              chromaTex.sample(s, cuv + float2( d.x, -d.y)).rg +
+                              chromaTex.sample(s, cuv + float2(-d.x, -d.y)).rg);
+        a = computeMatte(cuv, fullRangeChroma(cbcr, P), chromaTex, s, P);
+    }
 
     if (P.temporal > 0.0) {
         float prev = prevMatte.sample(s, fuv).r;
@@ -133,7 +192,7 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     // Spill suppression: remove the chroma component that points toward the key.
     float2 keyDir = P.keyCbCr - 0.5;
     float keyLen = length(keyDir);
-    if (keyLen > 1e-4 && P.bypass < 0.5) {
+    if (keyLen > 1e-4 && P.bypass < 0.5 && P.personMode < 0.5) {
         keyDir /= keyLen;
         float along = dot(cbcr - 0.5, keyDir);
         cbcr -= keyDir * max(along, 0.0) * P.spill;

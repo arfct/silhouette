@@ -57,6 +57,7 @@ struct Settings: Codable {
     /// Security-scoped bookmarks for the file paths in `recentWebURLs`.
     var fileBookmarks: [String: Data] = [:]
     var chromakeyOpen = false
+    var matteSource: Renderer.MatteSource = .chroma
     /// The layer over the keyed camera. The background keeps its original top-level keys.
     var foreground = LayerSettings()
 
@@ -111,6 +112,7 @@ struct Settings: Codable {
         shadowFollowsFace = (try? c.decodeIfPresent(Bool.self, forKey: .shadowFollowsFace)) ?? false
         // Keep only well-formed entries (a host with a dot, or localhost).
         chromakeyOpen = (try? c.decodeIfPresent(Bool.self, forKey: .chromakeyOpen)) ?? false
+        matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
             if $0.hasPrefix("/") || $0.hasPrefix("#") { return true }
             guard let host = URL(string: $0)?.host else { return false }
@@ -203,8 +205,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let m = renderer.cameraMapping
             faceTracker.process(small, camScale: m.scale, camOffset: m.offset)
         }
-        renderer.onStats = { [weak self] fps, gpuMs in
-            self?.statsLabel.stringValue = String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
+        renderer.onStats = { [weak self] fps, gpuMs, maskMs in
+            self?.statsLabel.stringValue = maskMs > 0
+                ? String(format: "%.0f fps · GPU %.2f ms · mask %.1f ms", fps, gpuMs, maskMs)
+                : String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
+        }
+        renderer.matteSource = settings.matteSource
+        controls.matteSource = settings.matteSource.rawValue
+        controls.onMatteSource = { [weak self] raw in
+            guard let self, let source = Renderer.MatteSource(rawValue: raw) else { return }
+            settings.matteSource = source
+            renderer.matteSource = source
+            cancelAutoKey()
+            // Segmentation masks flicker frame to frame; a little Stabilize is the right default.
+            if source == .person, renderer.keyParams.temporal == 0 {
+                renderer.update { $0.temporal = 0.3 }
+                controls.apply(params: renderer.keyParams)
+                paramsChanged()
+            }
+            settings.save()
         }
         renderer.trackingEnabled = settings.trackFace
         faceTracker.isEnabled = settings.trackFace
@@ -636,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Pool frames for about a second (or the frozen frame alone), then apply.
     private func runAutoKey() {
+        guard settings.matteSource == .chroma else { return }   // nothing to sample in person mode
         cancelAutoKey()
         let analyzer = AutoKeyAnalyzer()
         controls.autoRunning = true

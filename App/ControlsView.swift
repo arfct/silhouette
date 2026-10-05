@@ -221,6 +221,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onMirrorPreview: ((Bool) -> Void)?
     var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
+    /// 0 = chroma key, 1 = person segmentation.
+    var onMatteSource: ((Int) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -257,6 +259,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private var shadowGroup: NSView!
     private let keySwitch = NSSwitch()
     private var keyTools: NSStackView!
+    private let matteControl = NSSegmentedControl(labels: ["Green screen", "Person"], trackingMode: .selectOne, target: nil, action: nil)
     private let mirrorSwitch = NSSwitch()
     private let sinkDot = StatusDot()
     private var sinkGroup: NSView!
@@ -403,7 +406,14 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
         keyRangeCell = rangeCell("Color Range", keyRange, tip: "How close a colour must be to the key colour to be removed, in percent of the full chroma span. Left value: fully removed. Right value: where the transition to opaque ends. Typical keys sit between 5 and 20; type or arrow past 30 if needed.")
         // Chromakey: key colour and matte in one collapsible group.
+        matteControl.target = self
+        matteControl.action = #selector(matteChanged)
+        matteControl.selectedSegment = 0
+        matteControl.segmentDistribution = .fillEqually
+        matteControl.controlSize = .small
+        matteControl.toolTip = "Green screen keys a real backdrop by colour. Person finds you with on-device segmentation and needs no backdrop; it costs a few milliseconds per frame on the Neural Engine and edges are softer."
         let body = NSStackView(views: [
+            matteControl,
             keyRangeCell,
             columns([sliderCell("Shrink", \.edge, 0...4, decimals: 1, tip: "Pulls the matte edge in by this many pixels (at 1920×1080) to trim fringes. The same value means the same amount on a 720p or 4K source."),
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
@@ -926,6 +936,20 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
     }
     @objc private func freezeTapped() { frozen.toggle(); onFreeze?(frozen) }
+
+    /// Which matte the chromakey group is set up for. Person hides the colour tools.
+    var matteSource: Int {
+        get { matteControl.selectedSegment }
+        set {
+            matteControl.selectedSegment = newValue
+            let person = newValue == 1
+            keyRangeCell.isHidden = person
+            keySwatch.isHidden = person
+            autoButton.isHidden = person
+            cells[\.spill]?.cell.isHidden = person   // spill suppression is a chroma idea
+        }
+    }
+    @objc private func matteChanged() { matteSource = matteControl.selectedSegment; onMatteSource?(matteControl.selectedSegment) }
 
     /// Auto is running: the button shows it and ignores clicks.
     var autoRunning: Bool = false {

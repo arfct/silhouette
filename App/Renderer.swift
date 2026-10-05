@@ -34,6 +34,8 @@ struct KeyParams: Codable, Equatable {
     var fgScale = SIMD2<Float>(1, 1)
     var fgOffset = SIMD2<Float>(0, 0)
     var hasForeground: Float = 0
+    /// 1 when the matte comes from person segmentation. Set per frame; not persisted.
+    var personMode: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -99,7 +101,25 @@ final class Renderer {
     private var frameIndex = 0
 
     // Stats
-    var onStats: ((Double, Double) -> Void)?   // (fps, gpu ms per frame), about once a second, main thread
+    var onStats: ((Double, Double, Double) -> Void)?   // (fps, gpu ms, mask ms per frame), about once a second, main thread
+    /// Where the matte comes from: the chroma key, or Vision's person segmentation.
+    enum MatteSource: Int, Codable { case chroma = 0, person }
+    private var matte: MatteSource = .chroma
+    var matteSource: MatteSource {
+        get { lock.lock(); defer { lock.unlock() }; return matte }
+        set { lock.lock(); matte = newValue; lock.unlock() }
+    }
+    private lazy var personMatter = PersonMatter(device: device)
+    private var statMaskTime: Double = 0
+    /// Guided-filter upsample of the person mask, at half the camera resolution.
+    private var guidedPrepPipeline: MTLComputePipelineState!
+    private var guidedCoefficientsPipeline: MTLComputePipelineState!
+    private var guideTextures: (prep: MTLTexture, means: MTLTexture, ab: MTLTexture, meansAB: MTLTexture)?
+    private var guideBox4: MPSImageBox?
+    private var guideBox2: MPSImageBox?
+    /// Box radius in work-resolution pixels (about 8 px at 1080p) and the filter's regularisation.
+    private static let guideRadius = 3
+    private static let guideEpsilon: Float = 0.001
 
     /// Multiplier from face size (1 at the reference size). Offset and blur
     /// scale with it; opacity scales inversely so a distant subject casts a
@@ -173,6 +193,9 @@ final class Renderer {
         downDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
         downsamplePipeline = try! device.makeRenderPipelineState(descriptor: downDesc)
 
+        guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
+        guidedCoefficientsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedCoefficients")!)
+
         let tl = MTLRenderPipelineDescriptor()
         tl.vertexFunction = desc.vertexFunction
         tl.fragmentFunction = library.makeFunction(name: "trackLuma")
@@ -221,6 +244,47 @@ final class Renderer {
 
     /// (Re)allocate the processing-resolution textures when the scale changes.
     /// Called from the render thread only.
+    /// Four passes at half camera resolution: gather, box filter, coefficients,
+    /// box filter. Returns the averaged (a, b) texture the matte pass applies.
+    private func encodeGuidedUpsample(_ cmd: MTLCommandBuffer, luma: MTLTexture, mask: MTLTexture, camW: Int, camH: Int) -> MTLTexture {
+        let w = max(camW / 2, 1), h = max(camH / 2, 1)
+        if guideTextures == nil || guideTextures!.prep.width != w || guideTextures!.prep.height != h {
+            func make(_ format: MTLPixelFormat) -> MTLTexture {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+                d.storageMode = .private
+                d.usage = [.shaderRead, .shaderWrite]
+                return device.makeTexture(descriptor: d)!
+            }
+            guideTextures = (make(.rgba16Float), make(.rgba16Float), make(.rg16Float), make(.rg16Float))
+            let side = 2 * Self.guideRadius + 1
+            guideBox4 = MPSImageBox(device: device, kernelWidth: side, kernelHeight: side)
+            guideBox4?.edgeMode = .clamp
+            guideBox2 = MPSImageBox(device: device, kernelWidth: side, kernelHeight: side)
+            guideBox2?.edgeMode = .clamp
+        }
+        guard let t = guideTextures, let box4 = guideBox4, let box2 = guideBox2 else { return dummyBackground }
+        let grid = MTLSize(width: w, height: h, depth: 1)
+        let group = MTLSize(width: 16, height: 16, depth: 1)
+        var epsilon = Self.guideEpsilon
+
+        if let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(guidedPrepPipeline)
+            enc.setTexture(luma, index: 0); enc.setTexture(mask, index: 1); enc.setTexture(t.prep, index: 2)
+            enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+            enc.endEncoding()
+        }
+        box4.encode(commandBuffer: cmd, sourceTexture: t.prep, destinationTexture: t.means)
+        if let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(guidedCoefficientsPipeline)
+            enc.setTexture(t.means, index: 0); enc.setTexture(t.ab, index: 1)
+            enc.setBytes(&epsilon, length: MemoryLayout<Float>.size, index: 0)
+            enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+            enc.endEncoding()
+        }
+        box2.encode(commandBuffer: cmd, sourceTexture: t.ab, destinationTexture: t.meansAB)
+        return t.meansAB
+    }
+
     private func ensureProcessTextures() {
         lock.lock(); let scale = requestedScale; lock.unlock()
         guard scale != procScale else { return }
@@ -338,8 +402,28 @@ final class Renderer {
             p.hasForeground = 0
         }
 
+        // Person matte: segment this very frame before compositing it, so the
+        // matte never lags the image. A few milliseconds on the Neural Engine.
+        var maskTexture: MTLTexture = dummyBackground
+        var maskKeepAlive: Any? = nil
+        lock.lock(); let usePerson = matte == .person; lock.unlock()
+        if usePerson, p.bypass < 0.5, let mask = personMatter.mask(for: camera) {
+            maskTexture = mask.texture
+            maskKeepAlive = mask.keepAlive
+            p.personMode = 1
+            statMaskTime += personMatter.lastMilliseconds
+        } else {
+            p.personMode = 0
+        }
+
         ensureProcessTextures()
         guard let cmd = commandQueue.makeCommandBuffer() else { return }
+
+        // Guided-filter upsample of the person mask against this frame's luma.
+        var guideTexture: MTLTexture = dummyBackground
+        if p.personMode > 0.5 {
+            guideTexture = encodeGuidedUpsample(cmd, luma: luma.texture, mask: maskTexture, camW: camW, camH: camH)
+        }
 
         // Previous frame's luma for motion detection in the temporal blend.
         var prevLuma: (texture: MTLTexture, cv: CVMetalTexture)? = nil
@@ -361,6 +445,8 @@ final class Renderer {
             menc.setFragmentTexture(chroma.texture, index: 1)
             menc.setFragmentTexture(previous, index: 4)
             menc.setFragmentTexture(prevLuma?.texture ?? dummyBackground, index: 5)
+            menc.setFragmentTexture(maskTexture, index: 6)
+            menc.setFragmentTexture(guideTexture, index: 7)
             menc.setFragmentBytes(&mp, length: MemoryLayout<KeyParams>.stride, index: 0)
             menc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             menc.endEncoding()
@@ -466,7 +552,7 @@ final class Renderer {
             }
         }
 
-        let keepAlive = [luma.cv, chroma.cv, out.cv] + (prevLuma.map { [$0.cv] } ?? []) + trackingTex
+        let keepAlive: [Any] = [luma.cv, chroma.cv, out.cv] + (prevLuma.map { [$0.cv] } ?? []) + trackingTex + (maskKeepAlive.map { [$0] } ?? [])
         cmd.addCompletedHandler { [weak self] buffer in
             withExtendedLifetime(keepAlive) {}
             guard let self else { return }
@@ -571,9 +657,10 @@ final class Renderer {
         guard elapsed >= 1 else { return }
         let fps = Double(statFrames) / elapsed
         let gpuMs = statGPUTime / Double(statFrames) * 1000
-        statFrames = 0; statGPUTime = 0; statStart = now
-        statsLog.info("\(fps, format: .fixed(precision: 1)) fps, GPU \(gpuMs, format: .fixed(precision: 2)) ms/frame")
-        if let onStats { DispatchQueue.main.async { onStats(fps, gpuMs) } }
+        let maskMs = statMaskTime / Double(statFrames)
+        statFrames = 0; statGPUTime = 0; statMaskTime = 0; statStart = now
+        statsLog.info("\(fps, format: .fixed(precision: 1)) fps, GPU \(gpuMs, format: .fixed(precision: 2)) ms/frame, mask \(maskMs, format: .fixed(precision: 2)) ms")
+        if let onStats { DispatchQueue.main.async { onStats(fps, gpuMs, maskMs) } }
     }
 
     static func isVideoRange(_ buffer: CVPixelBuffer) -> Bool {
