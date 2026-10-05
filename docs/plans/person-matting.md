@@ -1,6 +1,6 @@
 # Plan: background removal without a green screen
 
-Status: proposal, 5 October 2026. Nothing here is built yet.
+Status: 5 October 2026. Milestones 1 to 3 are built on the `person-matte` branch: Vision segmentation at the fast level, a colour guided-filter upsample, a colour trimap band for the model's over-coverage, and edge decontamination. Measured: fast is about 2.5 ms per frame (9 ms in the app alongside face tracking), balanced 17 ms, accurate 50 ms, so only fast fits a frame; the plan's balanced-level estimate was wrong. Not yet done: system effect detection, subject selection, and the Metal 4 matting model.
 
 ## Goal
 
