@@ -54,6 +54,16 @@ the output.
 - The page is the background, so the person covers its centre. Put
   readouts near the edges, or draw things that are meant to sit behind the
   head, like the plane in the bundled test page.
+- Pages written for OBS browser sources work unchanged. Silhouette defines
+  `window.obsstudio` with the same shape OBS provides: `pluginVersion`,
+  `getCurrentScene`, `getScenes`, `getStatus`, `getControlLevel`, the
+  transition getters and setters, and the recording, streaming, replay
+  buffer, and virtual camera controls. The control methods do nothing; the
+  status reports a running virtual camera and nothing else active; the
+  source is always visible and active, and `obsSourceVisibleChanged`,
+  `obsSourceActiveChanged`, and `obsVirtualcamStarted` fire once the page
+  loads. The user agent ends in `OBS/31.0.0 Silhouette/<version>`, so a
+  user-agent check for OBS passes too.
 - The output is never mirrored. The app's preview is mirrored only for a
   live camera with Mirror on. `silhouette.mirrored` says which, the
   `silhouette-mirrored` class on `<html>` tracks it for CSS, and
