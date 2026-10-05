@@ -50,9 +50,13 @@ final class BackgroundController: NSObject {
         config.mediaTypesRequiringUserActionForPlayback = []
         config.userContentController.addUserScript(WKUserScript(source: "window.__silhouetteMirrored = true;", injectionTime: .atDocumentStart, forMainFrameOnly: false))
         config.userContentController.addUserScript(WKUserScript(source: Self.bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        config.userContentController.addUserScript(WKUserScript(source: Self.obsBridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: VirtualCameraConstants.width,
                                           height: VirtualCameraConstants.height), configuration: config)
         webView.isHidden = true
+        // Pages written for OBS browser sources sniff the user agent for "OBS".
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        webView.customUserAgent = (WKWebView().value(forKey: "userAgent") as? String ?? "Mozilla/5.0 (Macintosh)") + " OBS/\(Self.obsPluginVersion) Silhouette/\(version)"
         // No default white page background: a page covers only what it draws, so
         // the same page can serve as a foreground. Pages set their own background.
         webView.setValue(false, forKey: "drawsBackground")
@@ -79,6 +83,43 @@ final class BackgroundController: NSObject {
     })();
     """
 
+    /// The OBS browser-source version we claim, so pages that gate on it behave.
+    static let obsPluginVersion = "31.0.0"
+
+    /// window.obsstudio, as an OBS browser source provides it, so overlays built
+    /// for OBS run unchanged. Every control method is a no-op; the status says a
+    /// virtual camera is running; the source is always visible and active.
+    private static let obsBridge = """
+    (function(){ if (window.obsstudio) return;
+      const scene = { name: 'Silhouette', width: 1920, height: 1080 };
+      const status = { recording: false, recordingPaused: false, streaming: false, replaybuffer: false, virtualcam: true };
+      const noop = () => {};
+      window.obsstudio = {
+        pluginVersion: '\(obsPluginVersion)',
+        getCurrentScene(cb) { cb && cb(scene); },
+        getScenes(cb) { cb && cb([scene.name]); },
+        getStatus(cb) { cb && cb(Object.assign({}, status)); },
+        getControlLevel(cb) { cb && cb(0); },
+        getTransitions(cb) { cb && cb(['Cut']); },
+        getCurrentTransition(cb) { cb && cb('Cut'); },
+        setCurrentScene: noop, setCurrentTransition: noop,
+        saveReplayBuffer: noop, startReplayBuffer: noop, stopReplayBuffer: noop,
+        startRecording: noop, stopRecording: noop, pauseRecording: noop, unpauseRecording: noop,
+        startStreaming: noop, stopStreaming: noop,
+        startVirtualcam: noop, stopVirtualcam: noop,
+        onVisibilityChange: null, onActiveChange: null
+      };
+      const fire = () => {
+        for (const [type, detail] of [['obsSourceVisibleChanged', { visible: true }], ['obsSourceActiveChanged', { active: true }], ['obsVirtualcamStarted', undefined]]) {
+          window.dispatchEvent(new CustomEvent(type, { detail }));
+        }
+        if (typeof window.obsstudio.onVisibilityChange === 'function') window.obsstudio.onVisibilityChange(true);
+        if (typeof window.obsstudio.onActiveChange === 'function') window.obsstudio.onActiveChange(true);
+      };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fire); else fire();
+    })();
+    """
+
     /// Whether Silhouette's preview is mirrored, so pages can mirror text that
     /// should read correctly in it. Persisted into new page loads.
     var previewMirrored = true {
@@ -88,6 +129,7 @@ final class BackgroundController: NSObject {
             ucc.removeAllUserScripts()
             ucc.addUserScript(WKUserScript(source: "window.__silhouetteMirrored = \(previewMirrored);", injectionTime: .atDocumentStart, forMainFrameOnly: false))
             ucc.addUserScript(WKUserScript(source: Self.bridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+            ucc.addUserScript(WKUserScript(source: Self.obsBridge, injectionTime: .atDocumentStart, forMainFrameOnly: false))
             webView.evaluateJavaScript("window.silhouette && silhouette._setMirrored(\(previewMirrored));", completionHandler: nil)
         }
     }
