@@ -221,6 +221,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onMirrorPreview: ((Bool) -> Void)?
     var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
+    /// 0 = chroma key, 1 = person segmentation.
+    var onMatteSource: ((Int) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -257,6 +259,12 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private var shadowGroup: NSView!
     private let keySwitch = NSSwitch()
     private var keyTools: NSStackView!
+    private let matteControl = NSSegmentedControl(labels: ["Green screen", "Person", "Apple"], trackingMode: .selectOne, target: nil, action: nil)
+    /// Apple mode: open Video Effects, save the green image, and a status line.
+    private var systemRow: NSStackView!
+    private let systemStatus = NSTextField(wrappingLabelWithString: "")
+    var onOpenVideoEffects: (() -> Void)?
+    var onSaveGreenImage: (() -> Void)?
     private let mirrorSwitch = NSSwitch()
     private let sinkDot = StatusDot()
     private var sinkGroup: NSView!
@@ -403,7 +411,28 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
         keyRangeCell = rangeCell("Color Range", keyRange, tip: "How close a colour must be to the key colour to be removed, in percent of the full chroma span. Left value: fully removed. Right value: where the transition to opaque ends. Typical keys sit between 5 and 20; type or arrow past 30 if needed.")
         // Chromakey: key colour and matte in one collapsible group.
+        matteControl.target = self
+        matteControl.action = #selector(matteChanged)
+        matteControl.selectedSegment = 0
+        matteControl.segmentDistribution = .fillEqually
+        matteControl.controlSize = .small
+        matteControl.toolTip = "Green screen keys a real backdrop by colour. Person finds you with on-device segmentation and needs no backdrop. Apple uses the Mac's own Background effect with a flat green image, then keys that green: the best edges without a backdrop, on cameras that support it."
+        let effectsButton = NSButton(title: "Video Effects…", target: self, action: #selector(openVideoEffectsTapped)); effectsButton.controlSize = .small
+        effectsButton.toolTip = "Open the system Video Effects panel. Turn on Background, then choose the green image as a custom background."
+        let greenButton = NSButton(title: "Save Green Image…", target: self, action: #selector(saveGreenTapped)); greenButton.controlSize = .small
+        greenButton.toolTip = "Save a plain green 1920×1080 image to use as the custom background in Video Effects."
+        let systemButtons = NSStackView(views: [effectsButton, greenButton]); systemButtons.spacing = 8
+        systemStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        systemStatus.textColor = .secondaryLabelColor
+        systemStatus.preferredMaxLayoutWidth = Self.width - 48
+        systemRow = NSStackView(views: [systemButtons, systemStatus])
+        systemRow.orientation = .vertical
+        systemRow.alignment = .leading
+        systemRow.spacing = 6
+        systemRow.isHidden = true
         let body = NSStackView(views: [
+            matteControl,
+            systemRow,
             keyRangeCell,
             columns([sliderCell("Shrink", \.edge, 0...4, decimals: 1, tip: "Pulls the matte edge in by this many pixels (at 1920×1080) to trim fringes. The same value means the same amount on a 720p or 4K source."),
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
@@ -926,6 +955,32 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
     }
     @objc private func freezeTapped() { frozen.toggle(); onFreeze?(frozen) }
+
+    /// Which matte the chromakey group is set up for. Person hides the colour tools.
+    var matteSource: Int {
+        get { matteControl.selectedSegment }
+        set {
+            matteControl.selectedSegment = newValue
+            let person = newValue == 1
+            systemRow.isHidden = newValue != 2
+            keyRangeCell.isHidden = person
+            keySwatch.isHidden = person
+            autoButton.isHidden = person
+            if let spill = cells[\.spill]?.cell {   // same slider, different job per mode
+                spill.label.stringValue = person ? "Decontaminate" : "Desaturate"
+                let tip = person
+                    ? "Removes the background colour mixed into the subject's edge pixels, in percent. Hair and soft edges stop carrying the room's colour."
+                    : "Removes the backdrop's tint reflected onto hair and clothing, in percent."
+                spill.toolTip = tip; spill.label.toolTip = tip; spill.value.toolTip = tip; spill.control.toolTip = tip
+            }
+        }
+    }
+    /// The Apple-mode status line: what the system effect is doing on this camera.
+    func showSystemStatus(_ text: String) { systemStatus.stringValue = text }
+    @objc private func openVideoEffectsTapped() { onOpenVideoEffects?() }
+    @objc private func saveGreenTapped() { onSaveGreenImage?() }
+
+    @objc private func matteChanged() { matteSource = matteControl.selectedSegment; onMatteSource?(matteControl.selectedSegment) }
 
     /// Auto is running: the button shows it and ignores clicks.
     var autoRunning: Bool = false {

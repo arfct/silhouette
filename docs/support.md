@@ -30,4 +30,7 @@ Light the backdrop evenly. Then click the colour swatch and click your backdrop,
 Raise Desaturate.
 
 **Can I use it without a green screen?**
-Silhouette is a chroma keyer, so it needs a green or blue backdrop. To try the app without one, choose Sample video or Test pattern in the Source menu.
+Yes, two ways. In the Chromakey section choose **Person**, which finds you with on-device segmentation and works with any camera. Or choose **Apple**, which turns the Mac's own Background effect into a virtual green screen: save the green image, turn on Background in Video Effects with that image as a custom background, and Silhouette keys it. Apple gives cleaner hair edges and needs the built-in camera or iPhone Continuity Camera on macOS 15 or later.
+
+**Can I try it without any camera?**
+Choose Sample video or Test pattern in the Source menu.
