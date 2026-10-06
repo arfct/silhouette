@@ -150,6 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let autoFrameSpacing: CFTimeInterval = 0.2
     /// The source whose key is loaded, so a source change can restore or re-run Auto.
     private var keyedSourceID: String?
+    /// Watches the current camera's Background effect while in Apple mode.
+    private var backgroundEffectObservation: NSKeyValueObservation?
     /// fps and GPU time, in the title area above the preview.
     private let statsLabel = NSTextField(labelWithString: "")
     private let renderer = Renderer()
@@ -212,11 +214,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         renderer.matteSource = settings.matteSource
         controls.matteSource = settings.matteSource.rawValue
+        controls.onOpenVideoEffects = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
+        controls.onSaveGreenImage = { [weak self] in self?.saveGreenImage() }
         controls.onMatteSource = { [weak self] raw in
             guard let self, let source = Renderer.MatteSource(rawValue: raw) else { return }
             settings.matteSource = source
             renderer.matteSource = source
             cancelAutoKey()
+            watchSystemBackground()
+            if source == .system {
+                // Take people straight to the switch they need.
+                if !systemBackgroundActive { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
+            }
             // Segmentation masks flicker frame to frame; a little Stabilize is the right default.
             if source == .person, renderer.keyParams.temporal == 0 {
                 renderer.update { $0.temporal = 0.3 }
@@ -613,6 +622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Auto once frames are flowing. The first launch after this feature seeds
     /// the current source with the existing settings so nothing changes underfoot.
     private func sourceDidChange() {
+        watchSystemBackground()
         let id = currentSourceID
         guard id != keyedSourceID else { return }
         if keyedSourceID == nil && settings.sourceKeys.isEmpty { settings.sourceKeys[id] = currentSourceKey() }
@@ -639,6 +649,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // MARK: Apple's Background effect as a green screen
+
+    private var systemBackgroundActive: Bool {
+        guard #available(macOS 15.0, *), let device = camera.currentDevice else { return false }
+        return device.isBackgroundReplacementActive
+    }
+
+    /// In Apple mode, follow the current camera's Background effect: explain what
+    /// to do while it is off, and run Auto the moment it turns on.
+    private func watchSystemBackground() {
+        backgroundEffectObservation = nil
+        guard settings.matteSource == .system else { return }
+        guard #available(macOS 15.0, *) else {
+            controls.showSystemStatus("Apple's Background effect needs macOS 15 or later. Use Person instead.")
+            return
+        }
+        guard let device = camera.currentDevice else {
+            controls.showSystemStatus("Choose a camera. Movies and the test pattern have no system effects.")
+            return
+        }
+        guard device.activeFormat.isBackgroundReplacementSupported else {
+            controls.showSystemStatus("\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do; or use Person.")
+            return
+        }
+        let update: (Bool) -> Void = { [weak self] active in
+            guard let self else { return }
+            if active {
+                controls.showSystemStatus("Background effect is on. Keying its green.")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
+            } else {
+                controls.showSystemStatus("In Video Effects, turn on Background and pick the green image as a custom background. Silhouette keys it as soon as it appears.")
+            }
+        }
+        update(device.isBackgroundReplacementActive)
+        backgroundEffectObservation = device.observe(\.isBackgroundReplacementActive, options: [.new]) { _, change in
+            let active = change.newValue ?? false
+            DispatchQueue.main.async { update(active) }
+        }
+    }
+
+    /// A flat 1920×1080 green PNG for the Background effect's custom image.
+    private func saveGreenImage() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Silhouette Green.png"
+        panel.allowedContentTypes = [.png]
+        panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url else { return }
+            let w = 1920, h = 1080
+            guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return }
+            ctx.setFillColor(CGColor(srgbRed: 0, green: 0.85, blue: 0.2, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            guard let image = ctx.makeImage(),
+                  let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(dest, image, nil)
+            CGImageDestinationFinalize(dest)
+        }
+    }
+
     private var currentSourceID: String {
         settings.cameraID ?? camera.currentDevice?.uniqueID ?? "camera"
     }
@@ -655,7 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Pool frames for about a second (or the frozen frame alone), then apply.
     private func runAutoKey() {
-        guard settings.matteSource == .chroma else { return }   // nothing to sample in person mode
+        guard settings.matteSource != .person else { return }   // nothing to sample in person mode
         cancelAutoKey()
         let analyzer = AutoKeyAnalyzer()
         controls.autoRunning = true

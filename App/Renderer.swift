@@ -103,7 +103,9 @@ final class Renderer {
     // Stats
     var onStats: ((Double, Double, Double) -> Void)?   // (fps, gpu ms, mask ms per frame), about once a second, main thread
     /// Where the matte comes from: the chroma key, or Vision's person segmentation.
-    enum MatteSource: Int, Codable { case chroma = 0, person }
+    /// `.system` keys the green that Apple's Background effect paints behind the
+    /// subject, so the renderer treats it exactly like `.chroma`.
+    enum MatteSource: Int, Codable { case chroma = 0, person, system }
     private var matte: MatteSource = .chroma
     var matteSource: MatteSource {
         get { lock.lock(); defer { lock.unlock() }; return matte }
