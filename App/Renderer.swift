@@ -48,6 +48,8 @@ struct KeyParams: Codable, Equatable {
     var keyEnabled: Float = 1
     /// Luma of the picked backdrop, only so the swatch can show the colour as seen (not passed to the shader).
     var keyLuma: Float = 0.6
+    /// 1 applies the Color section; 0 leaves the camera colour alone (not passed to the shader).
+    var colorEnabled: Float = 1
 
     init() {}
 
@@ -67,6 +69,7 @@ struct KeyParams: Codable, Equatable {
         keyEnabled = f(.keyEnabled, d.keyEnabled)
         keyLuma = f(.keyLuma, d.keyLuma)
         temperature = f(.temperature, d.temperature)
+        colorEnabled = f(.colorEnabled, d.colorEnabled)
     }
 }
 
@@ -450,8 +453,9 @@ final class Renderer {
         // matte never lags the image. A few milliseconds on the Neural Engine.
         var maskTexture: MTLTexture = dummyBackground
         var maskKeepAlive: Any? = nil
-        lock.lock(); let usePerson = matte == .person; let auto = temperatureAuto; lock.unlock()
+        lock.lock(); let usePerson = matte == .person; let auto = temperatureAuto && p.colorEnabled > 0.5; lock.unlock()
         if auto { p.temperature = autoTemperature }
+        if p.colorEnabled < 0.5 { p.temperature = 0 }
         if usePerson, p.bypass < 0.5, let mask = personMatter.mask(for: camera) {
             maskTexture = mask.texture
             maskKeepAlive = mask.keepAlive
@@ -639,7 +643,7 @@ final class Renderer {
             let subject = SIMD2<Float>(Float(sums[0]), Float(sums[1])) / Float(sums[2])
             let background = SIMD2<Float>(Float(sums[3]), Float(sums[4])) / Float(sums[5])
             let delta = simd_dot(background - subject, Self.warmAxis)
-            target = min(max(delta / 0.06, -1), 1)
+            target = min(max(delta / 0.12, -1), 1)   // half strength: a tinted scene lands mid-range, not at the stop
         }
         let next = autoTemperature + (target - autoTemperature) * 0.15
         guard abs(next - autoTemperature) > 0.002 || (target == 0 && autoTemperature != 0) else { return }

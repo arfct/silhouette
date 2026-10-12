@@ -251,7 +251,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
     private let freezeButton = NSButton(title: "", target: nil, action: nil)
-    private let temperatureAutoSwitch = NSSwitch()
+    private let temperatureAutoSwitch = NSButton()
+    private let colorSwitch = NSSwitch()
     private var colorBody: NSView!
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
@@ -455,16 +456,24 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
 
         // Colour: corrections applied to the keyed camera image only, after the matte.
+        colorSwitch.target = self; colorSwitch.action = #selector(colorToggled)
+        colorSwitch.controlSize = .mini
+        colorSwitch.toolTip = "Apply the colour corrections. Off leaves your image's colour as the camera sends it."
+        temperatureAutoSwitch.setButtonType(.pushOnPushOff)
+        temperatureAutoSwitch.bezelStyle = .rounded
+        temperatureAutoSwitch.controlSize = .small
+        temperatureAutoSwitch.title = "Auto"
+        temperatureAutoSwitch.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         temperatureAutoSwitch.target = self; temperatureAutoSwitch.action = #selector(temperatureAutoChanged)
-        temperatureAutoSwitch.controlSize = .mini
         temperatureAutoSwitch.toolTip = "Match the background: measure the background's average colour and shift your image's temperature toward it. Off, set it yourself."
-        let autoLabel = NSTextField(labelWithString: "Match background"); autoLabel.font = .systemFont(ofSize: 11)
-        autoLabel.toolTip = temperatureAutoSwitch.toolTip
-        let autoRow = NSStackView(views: [autoLabel, temperatureAutoSwitch]); autoRow.spacing = 6
+        temperatureAutoSwitch.setContentHuggingPriority(.required, for: .horizontal)
         let temperatureCell = sliderCell("Temperature", \.temperature, -1...1, scale: 100, decimals: 0,
                                          tip: "Colour temperature of your image only. Left is cooler (bluer), right is warmer (more amber). Brightness stays the same. Layers are not affected.")
-        colorBody = temperatureCell
-        stack.addArrangedSubview(group("Color", trailing: autoRow, rows: [temperatureCell], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
+        let temperatureRow = NSStackView(views: [temperatureCell, temperatureAutoSwitch])
+        temperatureRow.spacing = 8
+        temperatureRow.alignment = .bottom   // the button sits level with the slider, not the title
+        colorBody = temperatureRow
+        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [temperatureRow], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -796,6 +805,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         offsetPad.value = params.shadowOffset
         shadowSwitch.state = params.shadowEnabled > 0.5 ? .on : .off
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
+        colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -924,6 +934,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
+    @objc private func colorToggled() {
+        refreshEnabledStates()
+        onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)
+    }
 
     /// Dim and disable what a switched-off feature makes moot: with the key off,
     /// its controls and the whole Shadow group; with the shadow off, its body.
@@ -945,7 +959,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         if keyOn { set(shadowBody, shadowOn) }
         set(overlayRow, trackSwitch.state == .on)
         set(highRateRow, trackSwitch.state == .on)
-        set(colorBody, temperatureAutoSwitch.state == .off)   // auto drives the slider
+        // Colour: everything off with the switch; with auto on, only the slider is dimmed since auto drives it.
+        let colorOn = colorSwitch.state == .on
+        set(colorBody, colorOn && temperatureAutoSwitch.state == .off)
+        temperatureAutoSwitch.isEnabled = colorOn
     }
 
     var temperatureAuto: Bool {
