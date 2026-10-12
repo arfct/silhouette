@@ -48,7 +48,7 @@ struct KeyParams: Codable, Equatable {
     var hasFace: Float = 0
     var aspect: Float = 16.0 / 9
     var wrapRows: Float = 54
-    var relightPad1: Float = 0
+    var illumReset: Float = 0
     var faceEllipse = SIMD4<Float>(0.5, 0.5, 0.1, 0.18)
     var faceForward = SIMD4<Float>(0, 0, -1, 0)
     var light0 = SIMD4<Float>(repeating: 0)
@@ -174,6 +174,15 @@ final class Renderer {
     private var shrinkPipeline: MTLComputePipelineState!
     private var rowExtentsPipeline: MTLComputePipelineState!
     private var rowExtentsBuffer: MTLBuffer!
+    /// Illumination map: ping-pong history at a fraction of the output size,
+    /// and a blurred copy of the current one for the composite to sample.
+    private var illumPipeline: MTLRenderPipelineState!
+    private var illumHistory: [MTLTexture] = []
+    private var illumBlurred: MTLTexture!
+    private var illumIndex = 0
+    private var illumBlur: MPSImageGaussianBlur!
+    private var illumValid = false
+    private static let illumSize = (w: 240, h: 135)
     private var lightBlur: MPSImageGaussianBlur!, wrapBlur: MPSImageGaussianBlur!
     private static let lightSize = (w: 64, h: 36), wrapSize = (w: 96, h: 54)
     /// Position + brightness and colour for two lights, eased; under `lock`.
@@ -274,6 +283,17 @@ final class Renderer {
         shrinkPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "shrinkGrid")!)
         rowExtentsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "rowExtents")!)
         rowExtentsBuffer = device.makeBuffer(length: Self.wrapSize.h * MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
+        let illumDesc = MTLRenderPipelineDescriptor()
+        illumDesc.vertexFunction = desc.vertexFunction
+        illumDesc.fragmentFunction = library.makeFunction(name: "relightMap")
+        illumDesc.colorAttachments[0].pixelFormat = .rgba16Float
+        illumPipeline = try! device.makeRenderPipelineState(descriptor: illumDesc)
+        let id = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Self.illumSize.w, height: Self.illumSize.h, mipmapped: false)
+        id.storageMode = .private
+        id.usage = [.shaderRead, .renderTarget, .shaderWrite]
+        illumHistory = [device.makeTexture(descriptor: id)!, device.makeTexture(descriptor: id)!]
+        illumBlurred = device.makeTexture(descriptor: id)!
+        illumBlur = MPSImageGaussianBlur(device: device, sigma: 2.5); illumBlur.edgeMode = .clamp
         lightBlur = MPSImageGaussianBlur(device: device, sigma: 2.0); lightBlur.edgeMode = .clamp
         wrapBlur = MPSImageGaussianBlur(device: device, sigma: 1.5); wrapBlur.edgeMode = .clamp
         guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
@@ -622,6 +642,28 @@ final class Renderer {
                 rows.dispatchThreads(MTLSize(width: Self.wrapSize.h, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: Self.wrapSize.h, height: 1, depth: 1))
                 rows.endEncoding()
             }
+            // Illumination map, eased against last frame's, then blurred for the composite.
+            let previous = illumHistory[1 - illumIndex], current = illumHistory[illumIndex]
+            illumIndex = 1 - illumIndex
+            p.illumReset = illumValid ? 0 : 1
+            illumValid = true
+            let ip = MTLRenderPassDescriptor()
+            ip.colorAttachments[0].texture = current
+            ip.colorAttachments[0].loadAction = .dontCare
+            ip.colorAttachments[0].storeAction = .store
+            if let ienc = cmd.makeRenderCommandEncoder(descriptor: ip) {
+                ienc.setRenderPipelineState(illumPipeline)
+                ienc.setFragmentTexture(lightTexture, index: 0)
+                ienc.setFragmentTexture(wrapTexture, index: 1)
+                ienc.setFragmentTexture(previous, index: 2)
+                ienc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
+                ienc.setFragmentBuffer(rowExtentsBuffer, offset: 0, index: 1)
+                ienc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                ienc.endEncoding()
+            }
+            illumBlur.encode(commandBuffer: cmd, sourceTexture: current, destinationTexture: illumBlurred)
+        } else {
+            illumValid = false   // next time the relight starts, it ramps in from nothing
         }
         let measureLights = relighting && frameIndex % Self.colorStatsEvery == 3
 
@@ -657,9 +699,7 @@ final class Renderer {
         enc.setFragmentTexture(matteSource, index: 4)
         enc.setFragmentTexture(fg ?? dummyBackground, index: 5)
         enc.setFragmentTexture(backgroundEstimate, index: 6)
-        enc.setFragmentTexture(lightTexture, index: 7)
-        enc.setFragmentTexture(wrapTexture, index: 8)
-        enc.setFragmentBuffer(rowExtentsBuffer, offset: 0, index: 1)
+        enc.setFragmentTexture(illumBlurred, index: 7)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
