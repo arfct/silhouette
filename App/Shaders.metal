@@ -368,6 +368,27 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     return out;
 }
 
+// Shrinks a texture to the destination size by averaging an 8×8 grid of
+// bilinear taps per destination texel: evenly spread, so no source region is
+// skipped, and far cheaper than a proper filter for a 60:1 reduction. Used
+// for the relight's light map and soft matte, which are blurred afterwards.
+kernel void shrinkGrid(texture2d<float, access::sample> src [[texture(0)]],
+                       texture2d<float, access::write> dst [[texture(1)]],
+                       uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 cell = 1.0 / float2(dst.get_width(), dst.get_height());
+    float2 origin = float2(gid) * cell;
+    float4 sum = 0.0;
+    for (int j = 0; j < 8; j++) {
+        for (int i = 0; i < 8; i++) {
+            sum += src.sample(s, origin + (float2(i, j) + 0.5) / 8.0 * cell);
+        }
+    }
+    dst.write(sum / 64.0, gid);
+}
+
 // Average colour of the subject (matte-weighted camera chroma) and of the
 // background layer, on a coarse grid, summed into fixed-point counters. The
 // CPU turns the two means into an automatic temperature setting.

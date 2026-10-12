@@ -171,7 +171,7 @@ final class Renderer {
     /// each half of the light map read back as a light.
     private var lightScratch: MTLTexture!, lightTexture: MTLTexture!
     private var wrapScratch: MTLTexture!, wrapTexture: MTLTexture!
-    private var lightScale: MPSImageLanczosScale!
+    private var shrinkPipeline: MTLComputePipelineState!
     private var lightBlur: MPSImageGaussianBlur!, wrapBlur: MPSImageGaussianBlur!
     private static let lightSize = (w: 64, h: 36), wrapSize = (w: 96, h: 54)
     /// Position + brightness and colour for two lights, eased; under `lock`.
@@ -269,7 +269,7 @@ final class Renderer {
         lightTexture = small(.bgra8Unorm, Self.lightSize, shared: true)
         wrapScratch = small(.r8Unorm, Self.wrapSize)
         wrapTexture = small(.r8Unorm, Self.wrapSize)
-        lightScale = MPSImageLanczosScale(device: device)
+        shrinkPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "shrinkGrid")!)
         lightBlur = MPSImageGaussianBlur(device: device, sigma: 2.0); lightBlur.edgeMode = .clamp
         wrapBlur = MPSImageGaussianBlur(device: device, sigma: 1.5); wrapBlur.edgeMode = .clamp
         guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
@@ -598,12 +598,17 @@ final class Renderer {
         }
 
         // Relight maps: the background to 64×36 and blurred, the matte to 96×54
-        // and blurred. Lanczos handles the big downscale; both are microseconds.
+        // and blurred. A grid-sampling kernel does the big downscale cheaply.
         let relighting = p.relight > 0 && p.bypass < 0.5 && bg != nil
-        if relighting, let bg {
-            lightScale.encode(commandBuffer: cmd, sourceTexture: bg, destinationTexture: lightScratch)
+        if relighting, let bg, let enc = cmd.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(shrinkPipeline)
+            for (src, dst) in [(bg, lightScratch!), (matteSource, wrapScratch!)] {
+                enc.setTexture(src, index: 0); enc.setTexture(dst, index: 1)
+                enc.dispatchThreads(MTLSize(width: dst.width, height: dst.height, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 16, height: 6, depth: 1))
+            }
+            enc.endEncoding()
             lightBlur.encode(commandBuffer: cmd, sourceTexture: lightScratch, destinationTexture: lightTexture)
-            lightScale.encode(commandBuffer: cmd, sourceTexture: matteSource, destinationTexture: wrapScratch)
             wrapBlur.encode(commandBuffer: cmd, sourceTexture: wrapScratch, destinationTexture: wrapTexture)
         }
         let measureLights = relighting && frameIndex % Self.colorStatsEvery == 3
