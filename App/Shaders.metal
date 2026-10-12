@@ -38,6 +38,7 @@ struct KeyParams {
     float4 light0Color;    // rgb with the largest channel 1
     float4 light1;
     float4 light1Color;
+    float  fgBlend;        // foreground blend mode: 0 normal, else see blendForeground
 };
 
 struct VSOut {
@@ -235,6 +236,28 @@ fragment float4 mattePass(VSOut in [[stage_in]],
     return float4(a, 0.0, 0.0, 1.0);
 }
 
+// Blend-mode formulas B(cb, cs) from the W3C compositing spec, per channel.
+static inline float3 blendForeground(int mode, float3 cb, float3 cs) {
+    switch (mode) {
+    case 1: return cb * cs;                                                  // multiply
+    case 2: return cb + cs - cb * cs;                                        // screen
+    case 3: return select(cs + (cb * 2.0 - 1.0) - cs * (cb * 2.0 - 1.0), cs * cb * 2.0, cb <= 0.5);   // overlay = hard light, operands swapped
+    case 4: {                                                                // soft light
+        float3 d = select(sqrt(cb), ((cb * 16.0 - 12.0) * cb + 4.0) * cb, cb <= 0.25);
+        return select(cb + (cs * 2.0 - 1.0) * (d - cb), cb - (1.0 - cs * 2.0) * cb * (1.0 - cb), cs <= 0.5);
+    }
+    case 5: return select(cb + (cs * 2.0 - 1.0) - cb * (cs * 2.0 - 1.0), cb * cs * 2.0, cs <= 0.5);   // hard light
+    case 6: return select(min(float3(1.0), cb / max(1.0 - cs, 1e-4)), float3(0.0), cb <= 0.0);       // colour dodge
+    case 7: return select(1.0 - min(float3(1.0), (1.0 - cb) / max(cs, 1e-4)), float3(1.0), cb >= 1.0); // colour burn
+    case 8: return min(cb + cs, 1.0);                                        // add (linear dodge)
+    case 9: return max(cb, cs);                                              // lighten
+    case 10: return min(cb, cs);                                             // darken
+    case 11: return abs(cb - cs);                                            // difference
+    case 12: return cb + cs - cb * cs * 2.0;                                 // exclusion
+    default: return cs;
+    }
+}
+
 // Keys directly in the camera's native YCbCr (4:2:0 bi-planar) so no colour
 // conversion happens before the key, then converts to RGB once.
 fragment float4 chromaKey(VSOut in [[stage_in]],
@@ -329,7 +352,17 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     if (P.hasForeground > 0.5) {
         float4 fg = fgTex.sample(s, in.uv * P.fgScale + P.fgOffset);
         if (P.fgMasked > 0.5) fg *= a;   // premultiplied, so one multiply confines it to the subject
-        out = fg + out * (1.0 - fg.a);
+        if (P.fgBlend > 0.5 && fg.a > 1e-4) {
+            // Separable blend modes as in the W3C compositing spec: the source
+            // colour is replaced by its blend with the backdrop where there is
+            // backdrop, then composited over as normal.
+            float3 cs = fg.rgb / fg.a;
+            float3 cb = out.a > 1e-4 ? out.rgb / out.a : float3(0.0);
+            float3 mixed = (1.0 - out.a) * cs + out.a * blendForeground(int(P.fgBlend + 0.5), cb, cs);
+            out = float4(fg.a * mixed + (1.0 - fg.a) * out.rgb, fg.a + out.a * (1.0 - fg.a));
+        } else {
+            out = fg + out * (1.0 - fg.a);
+        }
     }
     return out;
 }

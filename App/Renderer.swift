@@ -55,6 +55,10 @@ struct KeyParams: Codable, Equatable {
     var light0Color = SIMD4<Float>(repeating: 0)
     var light1 = SIMD4<Float>(repeating: 0)
     var light1Color = SIMD4<Float>(repeating: 0)
+    /// Foreground blend mode, 1-based index into ControlsView.blendModes; sent as 0 when fgBlendOn is 0.
+    var fgBlend: Float = 1
+    /// 1 applies fgBlend; 0 composites the foreground normally (not passed to the shader).
+    var fgBlendOn: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -89,6 +93,8 @@ struct KeyParams: Codable, Equatable {
         colorEnabled = f(.colorEnabled, d.colorEnabled)
         fgMasked = f(.fgMasked, d.fgMasked)
         relight = f(.relight, d.relight)
+        fgBlend = f(.fgBlend, d.fgBlend)
+        fgBlendOn = f(.fgBlendOn, d.fgBlendOn)
         highlights = f(.highlights, d.highlights)
     }
 }
@@ -503,6 +509,7 @@ final class Renderer {
         p.videoRange = Self.isVideoRange(camera) ? 1 : 0
         if p.shadowEnabled < 0.5 { p.shadowOpacity = 0 }
         if p.keyEnabled < 0.5 { p.bypass = 1 }   // chromakey off: plain camera, no shadow
+        if p.fgBlendOn < 0.5 { p.fgBlend = 0 }
         if depth != 1 {
             p.shadowOffset *= depth
             p.shadowBlur *= depth
