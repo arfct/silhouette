@@ -30,8 +30,8 @@ struct KeyParams {
     float  highlights;     // 0 only tints lit areas … 1 also brightens them
     float  hasFace;        // 1 when faceEllipse and faceForward are valid
     float  aspect;         // output width / height, to measure uv directions isotropically
-    float  relightPad0;    // keeps the float4s below 16-byte aligned without implicit padding
-    float  relightPad1;
+    float  wrapRows;       // rows in the row-extents buffer (the soft matte's height)
+    float  relightPad1;    // keeps the float4s below 16-byte aligned without implicit padding
     float4 faceEllipse;    // head ellipse in output uv: centre xy, radii zw
     float4 faceForward;    // unit vector the face points along, camera space (x right, y up, z away from the camera)
     float4 light0;         // xy: position in output uv, z: brightness 0…1
@@ -247,7 +247,8 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                           texture2d<float> bgEstTex  [[texture(6)]],
                           texture2d<float> lightTex  [[texture(7)]],
                           texture2d<float> wrapTex   [[texture(8)]],
-                          constant KeyParams &P      [[buffer(0)]])
+                          constant KeyParams &P      [[buffer(0)]],
+                          constant float2 *rowExtents [[buffer(1)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     constexpr sampler sb(filter::linear, address::clamp_to_edge);
@@ -308,40 +309,67 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
         rgb = saturate(shifted * (before / max(after, 1e-4)));
     }
 
-    // Relight: the background's light on the subject. Two parts. Light wrap:
-    // the blurred background's colour bleeds in where the soft matte is thin,
-    // i.e. along the silhouette. Head: the two brightest regions of the
-    // background act as lights on a sphere fitted to the face, plus a term for
-    // the direction the face points, so turning toward a light lights it.
-    // The result multiplies the pixel (albedo × illumination), so it lands on
-    // light, lit surfaces and leaves dark ones alone; Highlights adds brightness.
+    // Relight: the background's light on the subject, from the two brightest
+    // regions of the background (one per half, so a left/right bias in the
+    // background lights the matching side) plus light wrap along the edge.
+    // Normals: the head is a sphere fitted to the face box, with a term for
+    // the direction the face points; the rest of the silhouette is taken to
+    // be body shaped, a cylinder per row spanning the silhouette's extent on
+    // that row, so the side nearer a light faces it. The result multiplies
+    // the pixel (albedo × illumination), so it lands on light, lit surfaces
+    // and leaves dark ones alone; Highlights adds brightness on top.
     if (P.relight > 0.0 && P.bypass < 0.5 && a > 0.002) {
         float3 local = lightTex.sample(s, in.uv * P.bgScale + P.bgOffset).rgb;
         float inside = wrapTex.sample(s, in.uv).r;
         float3 lightSum = 0.0;
         float kSum = 0.0;
+
+        // Wrap: the background's local colour where the soft matte is thin.
         float wrap = 1.0 - smoothstep(0.0, 0.85, inside);
-        float kw = wrap * smoothstep(0.04, 0.35, dot(local, lumaWeights));
+        float kw = 0.7 * wrap * smoothstep(0.04, 0.35, dot(local, lumaWeights));
         lightSum += local * kw; kSum += kw;
+
+        // Body normal from this row's silhouette extent, interpolated between rows.
+        float rows = max(P.wrapRows, 1.0);
+        float rowf = clamp(in.uv.y * rows - 0.5, 0.0, rows - 1.0);
+        int r0 = int(rowf), r1 = min(r0 + 1, int(rows) - 1);
+        float2 ext = mix(rowExtents[r0], rowExtents[r1], rowf - float(r0));
+        float3 nBody = float3(0.0, 0.0, -1.0);
+        float halfW = (ext.y - ext.x) * 0.5;
+        if (halfW > 0.004) {
+            float u = clamp((in.uv.x - (ext.x + ext.y) * 0.5) / halfW, -1.0, 1.0);
+            nBody = float3(u, 0.0, -sqrt(1.0 - u * u));
+        }
+
+        // Head sphere, where the face is.
+        float headWeight = 0.0;
+        float3 nHead = nBody;
         if (P.hasFace > 0.5) {
             float2 d = (in.uv - P.faceEllipse.xy) / P.faceEllipse.zw;
             float r2 = dot(d, d);
             if (r2 < 1.0) {
-                float3 n = float3(d.x, -d.y, -sqrt(1.0 - r2));   // sphere normal, camera space
-                float fade = 1.0 - smoothstep(0.6, 1.0, r2);     // hand over to the wrap at the rim
-                for (int i = 0; i < 2; i++) {
-                    float4 L = i == 0 ? P.light0 : P.light1;
-                    float3 C = i == 0 ? P.light0Color.rgb : P.light1Color.rgb;
-                    if (L.z <= 0.0) continue;
-                    // From the head toward the light, slightly in front of the head so it reaches the face.
-                    float3 dir = normalize(float3((L.x - P.faceEllipse.x) * P.aspect, -(L.y - P.faceEllipse.y), -0.25));
-                    float sphere = max(dot(n, dir), 0.0);
-                    float plane = max(dot(P.faceForward.xyz, dir), 0.0);
-                    float g = (0.7 * sphere * sphere + 0.5 * plane) * L.z * fade;
-                    lightSum += C * g; kSum += g;
-                }
+                nHead = float3(d.x, -d.y, -sqrt(1.0 - r2));
+                headWeight = 1.0 - smoothstep(0.6, 1.0, r2);   // blends into the body at the rim
             }
         }
+
+        for (int i = 0; i < 2; i++) {
+            float4 L = i == 0 ? P.light0 : P.light1;
+            float3 C = i == 0 ? P.light0Color.rgb : P.light1Color.rgb;
+            if (L.z <= 0.0) continue;
+            // From this point toward the light, a little in front so side lights reach the front.
+            float3 dir = normalize(float3((L.x - in.uv.x) * P.aspect, -(L.y - in.uv.y), -0.25));
+            float body = max(dot(nBody, dir), 0.0);
+            float g = 0.8 * body * body * (1.0 - headWeight);
+            if (headWeight > 0.0) {
+                float sphere = max(dot(nHead, dir), 0.0);
+                float plane = max(dot(P.faceForward.xyz, dir), 0.0);
+                g += (0.7 * sphere * sphere + 0.5 * plane) * headWeight;
+            }
+            g *= L.z;
+            lightSum += C * g; kSum += g;
+        }
+
         if (kSum > 1e-4) {
             float3 tint = lightSum / max(max(lightSum.r, max(lightSum.g, lightSum.b)), 1e-4);
             float k = min(kSum, 1.0) * P.relight;
@@ -387,6 +415,22 @@ kernel void shrinkGrid(texture2d<float, access::sample> src [[texture(0)]],
         }
     }
     dst.write(sum / 64.0, gid);
+}
+
+// For each row of the soft matte, the leftmost and rightmost columns that are
+// inside the subject, as fractions of the width. The relight treats the span
+// as a cylinder. A row with no subject gets a zero-width span.
+kernel void rowExtents(texture2d<float, access::read> inside [[texture(0)]],
+                       device float2 *rows [[buffer(0)]],
+                       uint row [[thread_position_in_grid]])
+{
+    uint w = inside.get_width(), h = inside.get_height();
+    if (row >= h) return;
+    int l = -1, r = -1;
+    for (uint x = 0; x < w; x++) {
+        if (inside.read(uint2(x, row)).r > 0.5) { if (l < 0) l = int(x); r = int(x); }
+    }
+    rows[row] = l < 0 ? float2(0.5, 0.5) : float2(float(l) / float(w), float(r + 1) / float(w));
 }
 
 // Average colour of the subject (matte-weighted camera chroma) and of the

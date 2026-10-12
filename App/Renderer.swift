@@ -47,7 +47,7 @@ struct KeyParams: Codable, Equatable {
     /// Relight geometry, set per frame; not persisted.
     var hasFace: Float = 0
     var aspect: Float = 16.0 / 9
-    var relightPad0: Float = 0
+    var wrapRows: Float = 54
     var relightPad1: Float = 0
     var faceEllipse = SIMD4<Float>(0.5, 0.5, 0.1, 0.18)
     var faceForward = SIMD4<Float>(0, 0, -1, 0)
@@ -172,6 +172,8 @@ final class Renderer {
     private var lightScratch: MTLTexture!, lightTexture: MTLTexture!
     private var wrapScratch: MTLTexture!, wrapTexture: MTLTexture!
     private var shrinkPipeline: MTLComputePipelineState!
+    private var rowExtentsPipeline: MTLComputePipelineState!
+    private var rowExtentsBuffer: MTLBuffer!
     private var lightBlur: MPSImageGaussianBlur!, wrapBlur: MPSImageGaussianBlur!
     private static let lightSize = (w: 64, h: 36), wrapSize = (w: 96, h: 54)
     /// Position + brightness and colour for two lights, eased; under `lock`.
@@ -270,6 +272,8 @@ final class Renderer {
         wrapScratch = small(.r8Unorm, Self.wrapSize)
         wrapTexture = small(.r8Unorm, Self.wrapSize)
         shrinkPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "shrinkGrid")!)
+        rowExtentsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "rowExtents")!)
+        rowExtentsBuffer = device.makeBuffer(length: Self.wrapSize.h * MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
         lightBlur = MPSImageGaussianBlur(device: device, sigma: 2.0); lightBlur.edgeMode = .clamp
         wrapBlur = MPSImageGaussianBlur(device: device, sigma: 1.5); wrapBlur.edgeMode = .clamp
         guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
@@ -467,6 +471,7 @@ final class Renderer {
         if p.colorEnabled < 0.5 || bg == nil { p.relight = 0 }   // nothing to light with
         if p.relight > 0 {
             p.aspect = Float(outputWidth) / Float(outputHeight)
+            p.wrapRows = Float(Self.wrapSize.h)
             p.hasFace = CACurrentMediaTime() - faceTime < 1.0 ? 1 : 0
             p.faceEllipse = faceEllipse; p.faceForward = faceForward
             p.light0 = lights[0]; p.light0Color = lights[1]; p.light1 = lights[2]; p.light1Color = lights[3]
@@ -610,6 +615,13 @@ final class Renderer {
             enc.endEncoding()
             lightBlur.encode(commandBuffer: cmd, sourceTexture: lightScratch, destinationTexture: lightTexture)
             wrapBlur.encode(commandBuffer: cmd, sourceTexture: wrapScratch, destinationTexture: wrapTexture)
+            if let rows = cmd.makeComputeCommandEncoder() {
+                rows.setComputePipelineState(rowExtentsPipeline)
+                rows.setTexture(wrapTexture, index: 0)
+                rows.setBuffer(rowExtentsBuffer, offset: 0, index: 0)
+                rows.dispatchThreads(MTLSize(width: Self.wrapSize.h, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: Self.wrapSize.h, height: 1, depth: 1))
+                rows.endEncoding()
+            }
         }
         let measureLights = relighting && frameIndex % Self.colorStatsEvery == 3
 
@@ -647,6 +659,7 @@ final class Renderer {
         enc.setFragmentTexture(backgroundEstimate, index: 6)
         enc.setFragmentTexture(lightTexture, index: 7)
         enc.setFragmentTexture(wrapTexture, index: 8)
+        enc.setFragmentBuffer(rowExtentsBuffer, offset: 0, index: 1)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
