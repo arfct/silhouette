@@ -254,10 +254,9 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let temperatureAutoSwitch = NSButton()
     private let colorSwitch = NSSwitch()
     private let fgMaskSwitch = NSSwitch()
-    private let fgBlendSwitch = NSSwitch()
     private let fgBlendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    /// Foreground blend modes, in the shader's order (1-based).
-    static let blendModes = ["Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
+    /// Foreground blend modes, in the shader's order; Normal is 0.
+    static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
     private var colorBody: NSView!
     private var temperatureCell: NSView!
     private var overlayRow: NSView!
@@ -392,17 +391,20 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
         rebuildURLItems()
         fgMaskSwitch.target = self; fgMaskSwitch.action = #selector(fgMaskToggled)
-        fgBlendSwitch.target = self; fgBlendSwitch.action = #selector(fgBlendToggled)
         fgBlendPopup.addItems(withTitles: Self.blendModes)
         fgBlendPopup.controlSize = .small
         fgBlendPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         fgBlendPopup.target = self; fgBlendPopup.action = #selector(fgBlendModeChanged)
-        fgBlendPopup.toolTip = "How the foreground's colour combines with what is under it, as in an image editor."
+        fgBlendPopup.toolTip = "How the foreground combines with what is under it, as in an image editor. Normal lays it on top."
         fgBlendPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let blendLabel = NSTextField(labelWithString: "Blend")
+        blendLabel.font = .systemFont(ofSize: 12)
+        blendLabel.toolTip = fgBlendPopup.toolTip
+        let blendRow = NSStackView(views: [blendLabel, fgBlendPopup]); blendRow.spacing = 5
+        blendRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         let fgOptions = NSStackView(views: [
             inlineSwitch("Mask", fgMaskSwitch, tip: "Confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything."),
-            inlineSwitch("Blend", fgBlendSwitch, tip: "Combine the foreground with the picture using the blend mode on the right instead of laying it on top."),
-            fgBlendPopup,
+            blendRow,
         ])
         fgOptions.spacing = 12
         fgOptions.distribution = .fill
@@ -840,8 +842,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
         colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
         fgMaskSwitch.state = params.fgMasked > 0.5 ? .on : .off
-        fgBlendSwitch.state = params.fgBlendOn > 0.5 ? .on : .off
-        fgBlendPopup.selectItem(at: min(max(Int(params.fgBlend + 0.5) - 1, 0), Self.blendModes.count - 1))
+        fgBlendPopup.selectItem(at: min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1))
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -971,8 +972,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
     @objc private func fgMaskToggled() { onParam?(\.fgMasked, fgMaskSwitch.state == .on ? 1 : 0) }
-    @objc private func fgBlendToggled() { refreshEnabledStates(); onParam?(\.fgBlendOn, fgBlendSwitch.state == .on ? 1 : 0) }
-    @objc private func fgBlendModeChanged() { onParam?(\.fgBlend, Float(fgBlendPopup.indexOfSelectedItem + 1)) }
+    @objc private func fgBlendModeChanged() { onParam?(\.fgBlend, Float(fgBlendPopup.indexOfSelectedItem)) }
     @objc private func colorToggled() {
         refreshEnabledStates()
         onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)
@@ -998,7 +998,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         if keyOn { set(shadowBody, shadowOn) }
         set(overlayRow, trackSwitch.state == .on)
         set(highRateRow, trackSwitch.state == .on)
-        fgBlendPopup.isEnabled = fgBlendSwitch.state == .on
         // Colour: everything off with the switch; with auto on, only the slider is dimmed since auto drives it.
         let colorOn = colorSwitch.state == .on
         set(colorBody, colorOn)
