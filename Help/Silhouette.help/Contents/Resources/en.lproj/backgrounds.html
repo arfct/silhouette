@@ -14,6 +14,7 @@
 <p>Type a hex colour, with or without the hash, in three, four, six, or eight digits. The last pair of an eight-digit colour is alpha, so <code>#00000080</code> as a foreground is a half-strength darkening wash.</p>
 <h2>Foreground</h2>
 <p>The foreground is composited over the keyed camera and the background, so it needs transparency to be useful: a PNG with an alpha channel, a web page with a transparent body, or a colour with alpha. An opaque image or movie covers the whole frame. Web pages have no default white background in either layer, so a page covers only what it draws; the bundled test page is transparent and works as a foreground.</p>
+<p><b>Foreground only over you</b> confines the foreground layer to your silhouette. A colour with alpha, such as <code>#FF40C040</code>, becomes a tint on you alone; a web page with a transparent background can draw light or graphics that stop at your edges. Off, the foreground covers the whole frame.</p>
 <h2>Web pages</h2>
 <p>A web page rendered at 1920×1080 behind you. Pages can react to face tracking; see <a href="web-api.html">Web page API</a>.</p>
 <p>Pages are snapshotted about 15 times a second while they change, so they cost more than an image. Static pages back off to 3 snapshots a second.</p>

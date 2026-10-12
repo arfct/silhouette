@@ -253,6 +253,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let freezeButton = NSButton(title: "", target: nil, action: nil)
     private let temperatureAutoSwitch = NSButton()
     private let colorSwitch = NSSwitch()
+    private let fgMaskSwitch = NSSwitch()
     private var colorBody: NSView!
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
@@ -385,7 +386,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
             field.toolTip = "What shows \(what): nothing, the bundled test page, a web page URL, an image or movie file, or a hex colour like #1E90FF (8 digits for alpha). Pick from the list or type and press Return."
         }
         rebuildURLItems()
-        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [labeled("Background", urlField), labeled("Foreground", fgField)]))
+        fgMaskSwitch.target = self; fgMaskSwitch.action = #selector(fgMaskToggled)
+        let fgMaskRow = switchRow("Foreground only over you", fgMaskSwitch,
+                                  tip: "Confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
+        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [labeled("Background", urlField), labeled("Foreground", fgField), fgMaskRow]))
 
         // Key: swatch, Pick and Auto in the header; range and spill below.
         keySwatch.isBordered = false
@@ -806,6 +810,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         shadowSwitch.state = params.shadowEnabled > 0.5 ? .on : .off
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
         colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
+        fgMaskSwitch.state = params.fgMasked > 0.5 ? .on : .off
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -934,6 +939,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
+    @objc private func fgMaskToggled() { onParam?(\.fgMasked, fgMaskSwitch.state == .on ? 1 : 0) }
     @objc private func colorToggled() {
         refreshEnabledStates()
         onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)

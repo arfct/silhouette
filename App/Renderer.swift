@@ -38,6 +38,8 @@ struct KeyParams: Codable, Equatable {
     var personMode: Float = 0
     /// Colour temperature for the camera pixels only, -1 cool … +1 warm.
     var temperature: Float = 0
+    /// 1 shows the foreground layer only over the subject, as a colour wash or light on them.
+    var fgMasked: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -70,6 +72,7 @@ struct KeyParams: Codable, Equatable {
         keyLuma = f(.keyLuma, d.keyLuma)
         temperature = f(.temperature, d.temperature)
         colorEnabled = f(.colorEnabled, d.colorEnabled)
+        fgMasked = f(.fgMasked, d.fgMasked)
     }
 }
 

@@ -25,6 +25,7 @@ struct KeyParams {
     float  hasForeground;  // 1 = composite fgTex (premultiplied) over everything
     float  personMode;     // 1 = the matte comes from maskTex (person segmentation), not chroma
     float  temperature;    // colour temperature shift for the camera pixels only: -1 cool … +1 warm
+    float  fgMasked;       // 1 = the foreground layer shows only over the subject (multiplied by the matte)
 };
 
 struct VSOut {
@@ -306,6 +307,7 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     }
     if (P.hasForeground > 0.5) {
         float4 fg = fgTex.sample(s, in.uv * P.fgScale + P.fgOffset);
+        if (P.fgMasked > 0.5) fg *= a;   // premultiplied, so one multiply confines it to the subject
         out = fg + out * (1.0 - fg.a);
     }
     return out;
