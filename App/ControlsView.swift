@@ -255,6 +255,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let colorSwitch = NSSwitch()
     private let fgMaskSwitch = NSSwitch()
     private var colorBody: NSView!
+    private var temperatureCell: NSView!
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
     private var highRateRow: NSView!
@@ -473,11 +474,23 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         temperatureAutoSwitch.setContentHuggingPriority(.required, for: .horizontal)
         let temperatureCell = sliderCell("Temperature", \.temperature, -1...1, scale: 100, decimals: 0,
                                          tip: "Colour temperature of your image only. Left is cooler (bluer), right is warmer (more amber). Brightness stays the same. Layers are not affected.")
+        self.temperatureCell = temperatureCell
         let temperatureRow = NSStackView(views: [temperatureCell, temperatureAutoSwitch])
         temperatureRow.spacing = 8
         temperatureRow.alignment = .bottom   // the button sits level with the slider, not the title
-        colorBody = temperatureRow
-        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [temperatureRow], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
+        let relightRow = columns([
+            sliderCell("Relight", \.relight, 0...1, scale: 100, decimals: 0,
+                       tip: "Lets the background light you: its colour wraps around your edges, and its brightest areas light your head from their direction, following where you face when face tracking is on. Needs a background layer."),
+            sliderCell("Highlights", \.highlights, 0...1, scale: 100, decimals: 0,
+                       tip: "How much the relight brightens the lit areas as well as tinting them. 0 keeps your brightness; 100 adds strong highlights."),
+        ])
+        let colorStack = NSStackView(views: [temperatureRow, relightRow])
+        colorStack.orientation = .vertical
+        colorStack.alignment = .leading
+        colorStack.spacing = 8
+        for v in colorStack.arrangedSubviews { v.widthAnchor.constraint(equalTo: colorStack.widthAnchor).isActive = true }
+        colorBody = colorStack
+        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [colorStack], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -967,7 +980,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         set(highRateRow, trackSwitch.state == .on)
         // Colour: everything off with the switch; with auto on, only the slider is dimmed since auto drives it.
         let colorOn = colorSwitch.state == .on
-        set(colorBody, colorOn && temperatureAutoSwitch.state == .off)
+        set(colorBody, colorOn)
+        if colorOn { set(temperatureCell, temperatureAutoSwitch.state == .off) }
         temperatureAutoSwitch.isEnabled = colorOn
     }
 

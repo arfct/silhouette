@@ -270,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         faceTracker.onUpdate = { [weak self] state in
             guard let self else { return }
             preview.showFace(state)
+            renderer.setFace(state)
             background.send(face: state)
             foreground.send(face: state)
             updateShadowDepth(with: state)

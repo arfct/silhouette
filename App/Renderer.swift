@@ -40,6 +40,21 @@ struct KeyParams: Codable, Equatable {
     var temperature: Float = 0
     /// 1 shows the foreground layer only over the subject, as a colour wash or light on them.
     var fgMasked: Float = 0
+    /// Strength of the background's light on the subject, 0…1 (0 = off).
+    var relight: Float = 0
+    /// 0 only tints the lit areas; 1 also brightens them.
+    var highlights: Float = 0.3
+    /// Relight geometry, set per frame; not persisted.
+    var hasFace: Float = 0
+    var aspect: Float = 16.0 / 9
+    var relightPad0: Float = 0
+    var relightPad1: Float = 0
+    var faceEllipse = SIMD4<Float>(0.5, 0.5, 0.1, 0.18)
+    var faceForward = SIMD4<Float>(0, 0, -1, 0)
+    var light0 = SIMD4<Float>(repeating: 0)
+    var light0Color = SIMD4<Float>(repeating: 0)
+    var light1 = SIMD4<Float>(repeating: 0)
+    var light1Color = SIMD4<Float>(repeating: 0)
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -73,6 +88,8 @@ struct KeyParams: Codable, Equatable {
         temperature = f(.temperature, d.temperature)
         colorEnabled = f(.colorEnabled, d.colorEnabled)
         fgMasked = f(.fgMasked, d.fgMasked)
+        relight = f(.relight, d.relight)
+        highlights = f(.highlights, d.highlights)
     }
 }
 
@@ -149,6 +166,19 @@ final class Renderer {
     /// Called on the main thread with the smoothed automatic value when it changes.
     var onAutoTemperature: ((Float) -> Void)?
     private var colorStatsPipeline: MTLComputePipelineState!
+    /// Relight: the background shrunk and blurred into a light map, the matte
+    /// shrunk and blurred into a soft inside map, and the brightest region of
+    /// each half of the light map read back as a light.
+    private var lightScratch: MTLTexture!, lightTexture: MTLTexture!
+    private var wrapScratch: MTLTexture!, wrapTexture: MTLTexture!
+    private var lightScale: MPSImageLanczosScale!
+    private var lightBlur: MPSImageGaussianBlur!, wrapBlur: MPSImageGaussianBlur!
+    private static let lightSize = (w: 64, h: 36), wrapSize = (w: 96, h: 54)
+    /// Position + brightness and colour for two lights, eased; under `lock`.
+    private var lights = [SIMD4<Float>](repeating: .zero, count: 4)
+    private var faceEllipse = SIMD4<Float>(0.5, 0.5, 0.1, 0.18)
+    private var faceForward = SIMD4<Float>(0, 0, -1, 0)
+    private var faceTime: Double = 0
     private var colorStatsBuffer: MTLBuffer!
     private var autoTemperature: Float = 0
     private static let colorStatsEvery = 6
@@ -229,6 +259,19 @@ final class Renderer {
 
         colorStatsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "colorStats")!)
         colorStatsBuffer = device.makeBuffer(length: 6 * MemoryLayout<UInt32>.size, options: .storageModeShared)
+        func small(_ format: MTLPixelFormat, _ size: (w: Int, h: Int), shared: Bool = false) -> MTLTexture {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: size.w, height: size.h, mipmapped: false)
+            d.usage = [.shaderRead, .shaderWrite]
+            d.storageMode = shared ? .shared : .private
+            return device.makeTexture(descriptor: d)!
+        }
+        lightScratch = small(.bgra8Unorm, Self.lightSize)
+        lightTexture = small(.bgra8Unorm, Self.lightSize, shared: true)
+        wrapScratch = small(.r8Unorm, Self.wrapSize)
+        wrapTexture = small(.r8Unorm, Self.wrapSize)
+        lightScale = MPSImageLanczosScale(device: device)
+        lightBlur = MPSImageGaussianBlur(device: device, sigma: 2.0); lightBlur.edgeMode = .clamp
+        wrapBlur = MPSImageGaussianBlur(device: device, sigma: 1.5); wrapBlur.edgeMode = .clamp
         guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
         guidedCoefficientsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedCoefficients")!)
 
@@ -421,6 +464,13 @@ final class Renderer {
         lastCameraBuffer = camera
         lastCamScale = camScale
         lastCamOffset = camOffset
+        if p.colorEnabled < 0.5 || bg == nil { p.relight = 0 }   // nothing to light with
+        if p.relight > 0 {
+            p.aspect = Float(outputWidth) / Float(outputHeight)
+            p.hasFace = CACurrentMediaTime() - faceTime < 1.0 ? 1 : 0
+            p.faceEllipse = faceEllipse; p.faceForward = faceForward
+            p.light0 = lights[0]; p.light0Color = lights[1]; p.light1 = lights[2]; p.light1Color = lights[3]
+        }
         lock.unlock()
 
         p.camScale = camScale
@@ -547,6 +597,17 @@ final class Renderer {
             }
         }
 
+        // Relight maps: the background to 64×36 and blurred, the matte to 96×54
+        // and blurred. Lanczos handles the big downscale; both are microseconds.
+        let relighting = p.relight > 0 && p.bypass < 0.5 && bg != nil
+        if relighting, let bg {
+            lightScale.encode(commandBuffer: cmd, sourceTexture: bg, destinationTexture: lightScratch)
+            lightBlur.encode(commandBuffer: cmd, sourceTexture: lightScratch, destinationTexture: lightTexture)
+            lightScale.encode(commandBuffer: cmd, sourceTexture: matteSource, destinationTexture: wrapScratch)
+            wrapBlur.encode(commandBuffer: cmd, sourceTexture: wrapScratch, destinationTexture: wrapTexture)
+        }
+        let measureLights = relighting && frameIndex % Self.colorStatsEvery == 3
+
         // Colour statistics for the automatic temperature, every few frames.
         let measureColor = auto && frameIndex % Self.colorStatsEvery == 0
         if measureColor, let blit = cmd.makeBlitCommandEncoder() {
@@ -579,6 +640,8 @@ final class Renderer {
         enc.setFragmentTexture(matteSource, index: 4)
         enc.setFragmentTexture(fg ?? dummyBackground, index: 5)
         enc.setFragmentTexture(backgroundEstimate, index: 6)
+        enc.setFragmentTexture(lightTexture, index: 7)
+        enc.setFragmentTexture(wrapTexture, index: 8)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -632,9 +695,62 @@ final class Renderer {
             onOutput?(outBuffer)
             if let trackingBuffer { onTrackingFrame?(trackingBuffer) }
             if measureColor { updateAutoTemperature() }
+            if measureLights { updateLights(bgScale: p.bgScale, bgOffset: p.bgOffset) }
             recordStats(buffer)
         }
         cmd.commit()
+    }
+
+    /// Head geometry for the relight, from the face tracker: an ellipse a little
+    /// larger than the face box, so it covers hair and ears, and the direction
+    /// the face points. Eased so detection jitter does not flicker the light.
+    func setFace(_ state: FaceState) {
+        lock.lock(); defer { lock.unlock() }
+        guard state.detected, let box = state.box, let c = state.center, let pose = state.pose, pose.count == 16 else {
+            faceTime = 0; return
+        }
+        let ellipse = SIMD4<Float>(c.x, c.y, box.w * 0.62, box.h * 0.72)
+        let forward = SIMD4<Float>(-pose[8], -pose[9], -pose[10], 0)   // R·(0,0,-1)
+        if faceTime == 0 {
+            faceEllipse = ellipse; faceForward = forward
+        } else {
+            faceEllipse += (ellipse - faceEllipse) * 0.35
+            faceForward += (forward - faceForward) * 0.35
+        }
+        faceTime = CACurrentMediaTime()
+    }
+
+    /// Read the light map back and ease the two lights toward the brightest
+    /// region of each half: luma-cubed weighting finds the sources rather than
+    /// the average glow. Position is converted from background to output uv.
+    private func updateLights(bgScale: SIMD2<Float>, bgOffset: SIMD2<Float>) {
+        let w = Self.lightSize.w, h = Self.lightSize.h
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        lightTexture.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        let lumaWeights = SIMD3<Float>(0.2126, 0.7152, 0.0722)
+        var target = [SIMD4<Float>](repeating: .zero, count: 4)
+        for half in 0..<2 {
+            var sw: Float = 0, sx: Float = 0, sy: Float = 0, sc = SIMD3<Float>(repeating: 0)
+            for y in 0..<h {
+                for x in (half == 0 ? 0..<w / 2 : w / 2..<w) {
+                    let i = (y * w + x) * 4
+                    let c = SIMD3<Float>(Float(bytes[i + 2]), Float(bytes[i + 1]), Float(bytes[i])) / 255   // BGRA
+                    let lum = simd_dot(c, lumaWeights)
+                    let wgt = lum * lum * lum
+                    sw += wgt; sx += wgt * (Float(x) + 0.5) / Float(w); sy += wgt * (Float(y) + 0.5) / Float(h); sc += wgt * c
+                }
+            }
+            guard sw > 1e-3 else { continue }
+            let colour = sc / sw
+            let t = min(max((simd_dot(colour, lumaWeights) - 0.08) / (0.45 - 0.08), 0), 1)
+            let brightness = t * t * (3 - 2 * t)
+            let pos = (SIMD2<Float>(sx, sy) / sw - bgOffset) / bgScale
+            target[half * 2] = SIMD4<Float>(pos.x, pos.y, brightness, 0)
+            target[half * 2 + 1] = SIMD4<Float>(colour / max(colour.max(), 1e-3), 0)
+        }
+        lock.lock()
+        for i in 0..<4 { lights[i] += (target[i] - lights[i]) * 0.25 }
+        lock.unlock()
     }
 
     /// Read the colour sums back and ease the automatic temperature toward the

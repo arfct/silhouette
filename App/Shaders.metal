@@ -26,6 +26,18 @@ struct KeyParams {
     float  personMode;     // 1 = the matte comes from maskTex (person segmentation), not chroma
     float  temperature;    // colour temperature shift for the camera pixels only: -1 cool … +1 warm
     float  fgMasked;       // 1 = the foreground layer shows only over the subject (multiplied by the matte)
+    float  relight;        // 0…1 strength of the background's light on the subject
+    float  highlights;     // 0 only tints lit areas … 1 also brightens them
+    float  hasFace;        // 1 when faceEllipse and faceForward are valid
+    float  aspect;         // output width / height, to measure uv directions isotropically
+    float  relightPad0;    // keeps the float4s below 16-byte aligned without implicit padding
+    float  relightPad1;
+    float4 faceEllipse;    // head ellipse in output uv: centre xy, radii zw
+    float4 faceForward;    // unit vector the face points along, camera space (x right, y up, z away from the camera)
+    float4 light0;         // xy: position in output uv, z: brightness 0…1
+    float4 light0Color;    // rgb with the largest channel 1
+    float4 light1;
+    float4 light1Color;
 };
 
 struct VSOut {
@@ -233,6 +245,8 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                           texture2d<float> matteTex  [[texture(4)]],
                           texture2d<float> fgTex     [[texture(5)]],
                           texture2d<float> bgEstTex  [[texture(6)]],
+                          texture2d<float> lightTex  [[texture(7)]],
+                          texture2d<float> wrapTex   [[texture(8)]],
                           constant KeyParams &P      [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
@@ -286,12 +300,53 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
 
     // Colour temperature, camera pixels only: a white-balance gain on red and
     // blue, renormalised so brightness does not change. Layers are untouched.
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     if (P.temperature != 0.0 && P.bypass < 0.5) {
         float t = P.temperature * 0.22;
         float3 shifted = rgb * float3(1.0 + t, 1.0, 1.0 - t);
-        const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
         float before = dot(rgb, lumaWeights), after = dot(shifted, lumaWeights);
         rgb = saturate(shifted * (before / max(after, 1e-4)));
+    }
+
+    // Relight: the background's light on the subject. Two parts. Light wrap:
+    // the blurred background's colour bleeds in where the soft matte is thin,
+    // i.e. along the silhouette. Head: the two brightest regions of the
+    // background act as lights on a sphere fitted to the face, plus a term for
+    // the direction the face points, so turning toward a light lights it.
+    // The result multiplies the pixel (albedo × illumination), so it lands on
+    // light, lit surfaces and leaves dark ones alone; Highlights adds brightness.
+    if (P.relight > 0.0 && P.bypass < 0.5 && a > 0.002) {
+        float3 local = lightTex.sample(s, in.uv * P.bgScale + P.bgOffset).rgb;
+        float inside = wrapTex.sample(s, in.uv).r;
+        float3 lightSum = 0.0;
+        float kSum = 0.0;
+        float wrap = 1.0 - smoothstep(0.0, 0.85, inside);
+        float kw = wrap * smoothstep(0.04, 0.35, dot(local, lumaWeights));
+        lightSum += local * kw; kSum += kw;
+        if (P.hasFace > 0.5) {
+            float2 d = (in.uv - P.faceEllipse.xy) / P.faceEllipse.zw;
+            float r2 = dot(d, d);
+            if (r2 < 1.0) {
+                float3 n = float3(d.x, -d.y, -sqrt(1.0 - r2));   // sphere normal, camera space
+                float fade = 1.0 - smoothstep(0.6, 1.0, r2);     // hand over to the wrap at the rim
+                for (int i = 0; i < 2; i++) {
+                    float4 L = i == 0 ? P.light0 : P.light1;
+                    float3 C = i == 0 ? P.light0Color.rgb : P.light1Color.rgb;
+                    if (L.z <= 0.0) continue;
+                    // From the head toward the light, slightly in front of the head so it reaches the face.
+                    float3 dir = normalize(float3((L.x - P.faceEllipse.x) * P.aspect, -(L.y - P.faceEllipse.y), -0.25));
+                    float sphere = max(dot(n, dir), 0.0);
+                    float plane = max(dot(P.faceForward.xyz, dir), 0.0);
+                    float g = (0.7 * sphere * sphere + 0.5 * plane) * L.z * fade;
+                    lightSum += C * g; kSum += g;
+                }
+            }
+        }
+        if (kSum > 1e-4) {
+            float3 tint = lightSum / max(max(lightSum.r, max(lightSum.g, lightSum.b)), 1e-4);
+            float k = min(kSum, 1.0) * P.relight;
+            rgb = saturate(rgb * mix(float3(1.0), tint, k) * (1.0 + P.highlights * k));
+        }
     }
 
     // Everything below is premultiplied. The shadow is black, so over the
