@@ -24,6 +24,7 @@ struct KeyParams {
     float2 fgOffset;
     float  hasForeground;  // 1 = composite fgTex (premultiplied) over everything
     float  personMode;     // 1 = the matte comes from maskTex (person segmentation), not chroma
+    float  temperature;    // colour temperature shift for the camera pixels only: -1 cool … +1 warm
 };
 
 struct VSOut {
@@ -282,6 +283,16 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                                  y - 0.1873 * cb - 0.4681 * cr,
                                  y + 1.8556 * cb));
 
+    // Colour temperature, camera pixels only: a white-balance gain on red and
+    // blue, renormalised so brightness does not change. Layers are untouched.
+    if (P.temperature != 0.0 && P.bypass < 0.5) {
+        float t = P.temperature * 0.22;
+        float3 shifted = rgb * float3(1.0 + t, 1.0, 1.0 - t);
+        const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+        float before = dot(rgb, lumaWeights), after = dot(shifted, lumaWeights);
+        rgb = saturate(shifted * (before / max(after, 1e-4)));
+    }
+
     // Everything below is premultiplied. The shadow is black, so over the
     // background it darkens colour and adds coverage where the background is clear.
     float4 out;
@@ -298,6 +309,38 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
         out = fg + out * (1.0 - fg.a);
     }
     return out;
+}
+
+// Average colour of the subject (matte-weighted camera chroma) and of the
+// background layer, on a coarse grid, summed into fixed-point counters. The
+// CPU turns the two means into an automatic temperature setting.
+kernel void colorStats(texture2d<float> lumaTex   [[texture(0)]],
+                       texture2d<float> chromaTex [[texture(1)]],
+                       texture2d<float> matteTex  [[texture(2)]],
+                       texture2d<float> bgTex     [[texture(3)]],
+                       device atomic_uint *sums   [[buffer(1)]],
+                       constant KeyParams &P      [[buffer(0)]],
+                       uint2 gid [[thread_position_in_grid]],
+                       uint2 grid [[threads_per_grid]])
+{
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(grid);
+    float2 cuv = uv * P.camScale + P.camOffset;
+    float a = matteTex.sample(s, uv).r;
+    float2 cbcr = fullRangeChroma(chromaTex.sample(s, cuv).rg, P);
+    const float scale = 1024.0;
+    atomic_fetch_add_explicit(&sums[0], uint(a * cbcr.x * scale), memory_order_relaxed);
+    atomic_fetch_add_explicit(&sums[1], uint(a * cbcr.y * scale), memory_order_relaxed);
+    atomic_fetch_add_explicit(&sums[2], uint(a * scale), memory_order_relaxed);
+    if (P.hasBackground > 0.5) {
+        float4 bg = bgTex.sample(s, uv * P.bgScale + P.bgOffset);
+        float3 c = bg.a > 1e-3 ? bg.rgb / bg.a : float3(0.0);   // premultiplied
+        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        float cb = (c.b - y) / 1.8556 + 0.5, cr = (c.r - y) / 1.5748 + 0.5;
+        atomic_fetch_add_explicit(&sums[3], uint(bg.a * cb * scale), memory_order_relaxed);
+        atomic_fetch_add_explicit(&sums[4], uint(bg.a * cr * scale), memory_order_relaxed);
+        atomic_fetch_add_explicit(&sums[5], uint(bg.a * scale), memory_order_relaxed);
+    }
 }
 
 // 2x2 box downsample: one bilinear tap at the centre of each 2x2 block

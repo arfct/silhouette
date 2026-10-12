@@ -36,6 +36,8 @@ struct KeyParams: Codable, Equatable {
     var hasForeground: Float = 0
     /// 1 when the matte comes from person segmentation. Set per frame; not persisted.
     var personMode: Float = 0
+    /// Colour temperature for the camera pixels only, -1 cool … +1 warm.
+    var temperature: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -64,6 +66,7 @@ struct KeyParams: Codable, Equatable {
         shadowEnabled = f(.shadowEnabled, d.shadowEnabled)
         keyEnabled = f(.keyEnabled, d.keyEnabled)
         keyLuma = f(.keyLuma, d.keyLuma)
+        temperature = f(.temperature, d.temperature)
     }
 }
 
@@ -126,6 +129,25 @@ final class Renderer {
     /// Box radius in work-resolution pixels (about 8 px at 1080p) and the filter's regularisation.
     private static let guideRadius = 3
     private static let guideEpsilon: Float = 0.001
+
+    /// Automatic colour temperature: measure the subject's and the background's
+    /// average chroma every few frames and move the subject toward the background.
+    var temperatureAuto = false {
+        didSet {
+            // Ease from the manual value when auto starts; keep what auto settled on when it stops.
+            lock.lock()
+            if temperatureAuto { autoTemperature = params.temperature } else { params.temperature = autoTemperature }
+            lock.unlock()
+        }
+    }
+    /// Called on the main thread with the smoothed automatic value when it changes.
+    var onAutoTemperature: ((Float) -> Void)?
+    private var colorStatsPipeline: MTLComputePipelineState!
+    private var colorStatsBuffer: MTLBuffer!
+    private var autoTemperature: Float = 0
+    private static let colorStatsEvery = 6
+    /// Warm direction in (Cb, Cr): less blue, more red.
+    private static let warmAxis = simd_normalize(SIMD2<Float>(-1, 1))
 
     /// Multiplier from face size (1 at the reference size). Offset and blur
     /// scale with it; opacity scales inversely so a distant subject casts a
@@ -199,6 +221,8 @@ final class Renderer {
         downDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
         downsamplePipeline = try! device.makeRenderPipelineState(descriptor: downDesc)
 
+        colorStatsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "colorStats")!)
+        colorStatsBuffer = device.makeBuffer(length: 6 * MemoryLayout<UInt32>.size, options: .storageModeShared)
         guidedPrepPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedPrep")!)
         guidedCoefficientsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "guidedCoefficients")!)
 
@@ -426,7 +450,8 @@ final class Renderer {
         // matte never lags the image. A few milliseconds on the Neural Engine.
         var maskTexture: MTLTexture = dummyBackground
         var maskKeepAlive: Any? = nil
-        lock.lock(); let usePerson = matte == .person; lock.unlock()
+        lock.lock(); let usePerson = matte == .person; let auto = temperatureAuto; lock.unlock()
+        if auto { p.temperature = autoTemperature }
         if usePerson, p.bypass < 0.5, let mask = personMatter.mask(for: camera) {
             maskTexture = mask.texture
             maskKeepAlive = mask.keepAlive
@@ -515,6 +540,22 @@ final class Renderer {
             }
         }
 
+        // Colour statistics for the automatic temperature, every few frames.
+        let measureColor = auto && frameIndex % Self.colorStatsEvery == 0
+        if measureColor, let blit = cmd.makeBlitCommandEncoder() {
+            blit.fill(buffer: colorStatsBuffer, range: 0..<colorStatsBuffer.length, value: 0)
+            blit.endEncoding()
+            if let enc = cmd.makeComputeCommandEncoder() {
+                enc.setComputePipelineState(colorStatsPipeline)
+                enc.setTexture(luma.texture, index: 0); enc.setTexture(chroma.texture, index: 1)
+                enc.setTexture(matteSource, index: 2); enc.setTexture(bg ?? dummyBackground, index: 3)
+                enc.setBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
+                enc.setBuffer(colorStatsBuffer, offset: 0, index: 1)
+                enc.dispatchThreads(MTLSize(width: 96, height: 54, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 9, depth: 1))
+                enc.endEncoding()
+            }
+        }
+
         // Composite at processing resolution, straight into the output at 1x.
         let compositeTarget = hiTexture ?? out.texture
         let pass = MTLRenderPassDescriptor()
@@ -583,9 +624,27 @@ final class Renderer {
             guard let self else { return }
             onOutput?(outBuffer)
             if let trackingBuffer { onTrackingFrame?(trackingBuffer) }
+            if measureColor { updateAutoTemperature() }
             recordStats(buffer)
         }
         cmd.commit()
+    }
+
+    /// Read the colour sums back and ease the automatic temperature toward the
+    /// value that moves the subject's average chroma onto the background's.
+    private func updateAutoTemperature() {
+        let sums = colorStatsBuffer.contents().bindMemory(to: UInt32.self, capacity: 6)
+        var target: Float = 0
+        if sums[2] > 1024 * 50, sums[5] > 1024 * 50 {   // enough subject and enough background
+            let subject = SIMD2<Float>(Float(sums[0]), Float(sums[1])) / Float(sums[2])
+            let background = SIMD2<Float>(Float(sums[3]), Float(sums[4])) / Float(sums[5])
+            let delta = simd_dot(background - subject, Self.warmAxis)
+            target = min(max(delta / 0.06, -1), 1)
+        }
+        let next = autoTemperature + (target - autoTemperature) * 0.15
+        guard abs(next - autoTemperature) > 0.002 || (target == 0 && autoTemperature != 0) else { return }
+        autoTemperature = next
+        if let onAutoTemperature { let value = next; DispatchQueue.main.async { onAutoTemperature(value) } }
     }
 
     /// Sample the key colour from the most recent camera frame.

@@ -223,6 +223,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onFaceOverlay: ((Bool) -> Void)?
     /// 0 = chroma key, 1 = person segmentation.
     var onMatteSource: ((Int) -> Void)?
+    var onTemperatureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -250,6 +251,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
     private let freezeButton = NSButton(title: "", target: nil, action: nil)
+    private let temperatureAutoSwitch = NSSwitch()
+    private var colorBody: NSView!
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
     private var highRateRow: NSView!
@@ -450,6 +453,18 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         chromaDisclosure.action = #selector(chromaToggled)
         chromaDisclosure.toolTip = "Show or hide the chromakey controls"
         stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
+
+        // Colour: corrections applied to the keyed camera image only, after the matte.
+        temperatureAutoSwitch.target = self; temperatureAutoSwitch.action = #selector(temperatureAutoChanged)
+        temperatureAutoSwitch.controlSize = .mini
+        temperatureAutoSwitch.toolTip = "Match the background: measure the background's average colour and shift your image's temperature toward it. Off, set it yourself."
+        let autoLabel = NSTextField(labelWithString: "Match background"); autoLabel.font = .systemFont(ofSize: 11)
+        autoLabel.toolTip = temperatureAutoSwitch.toolTip
+        let autoRow = NSStackView(views: [autoLabel, temperatureAutoSwitch]); autoRow.spacing = 6
+        let temperatureCell = sliderCell("Temperature", \.temperature, -1...1, scale: 100, decimals: 0,
+                                         tip: "Colour temperature of your image only. Left is cooler (bluer), right is warmer (more amber). Brightness stays the same. Layers are not affected.")
+        colorBody = temperatureCell
+        stack.addArrangedSubview(group("Color", trailing: autoRow, rows: [temperatureCell], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -930,6 +945,20 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         if keyOn { set(shadowBody, shadowOn) }
         set(overlayRow, trackSwitch.state == .on)
         set(highRateRow, trackSwitch.state == .on)
+        set(colorBody, temperatureAutoSwitch.state == .off)   // auto drives the slider
+    }
+
+    var temperatureAuto: Bool {
+        get { temperatureAutoSwitch.state == .on }
+        set { temperatureAutoSwitch.state = newValue ? .on : .off; refreshEnabledStates() }
+    }
+    @objc private func temperatureAutoChanged() { refreshEnabledStates(); onTemperatureAuto?(temperatureAutoSwitch.state == .on) }
+
+    /// Show the automatic temperature in the slider without treating it as a user change.
+    func showTemperature(_ value: Float) {
+        guard let (slider, cell, _, scale, decimals) = cells[\.temperature] else { return }
+        slider.floatValue = value
+        cell.value.stringValue = Self.format(value, scale: scale, decimals: decimals)
     }
 
     var faceHighRate: Bool {
