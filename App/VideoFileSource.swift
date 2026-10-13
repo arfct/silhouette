@@ -1,9 +1,11 @@
 import AVFoundation
 import QuartzCore
 
-/// Plays a movie file as a camera source, looping. Hardware decode via
-/// AVPlayer; frames come out as the same 4:2:0 full-range buffers a camera
-/// produces, so 4K files exercise the whole pipeline.
+/// Plays a movie file, looping, with hardware decode via AVPlayer. As a
+/// camera source it pushes frames through `onFrame` from a timer at the
+/// movie's frame rate (4:2:0 buffers like a camera's, so 4K files exercise
+/// the whole pipeline). As a layer it is pulled instead: `pull()` returns the
+/// frame for now, called once per rendered frame, so there is no timer at all.
 final class VideoFileSource {
     var onFrame: ((CVPixelBuffer) -> Void)?
     /// Called once the track loads: true when its display matrix flips it
@@ -17,6 +19,10 @@ final class VideoFileSource {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).video", qos: .userInteractive)
     private var endObserver: NSObjectProtocol?
+    /// Seconds per frame of the movie, once the track has loaded; 1/30 until then.
+    private var frameInterval: Double = 1.0 / 30
+    private var playing = false
+    private var pushing = false
 
     /// `pixelFormat` defaults to video-range 4:2:0, what the hardware decoder
     /// emits for 8-bit H.264/HEVC, so no per-frame conversion pass. Backgrounds
@@ -38,6 +44,9 @@ final class VideoFileSource {
             if let track = try? await asset.loadTracks(withMediaType: .video).first,
                let duration = try? await asset.load(.duration),
                let transform = try? await track.load(.preferredTransform) {
+                if let rate = try? await track.load(.nominalFrameRate), rate > 1 {
+                    await MainActor.run { self?.frameInterval = 1.0 / Double(rate) }
+                }
                 let composition = AVMutableComposition()
                 let ct = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
                 try? ct?.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
@@ -58,32 +67,55 @@ final class VideoFileSource {
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: nil) { [weak self] _ in
             self?.player.seek(to: .zero)
         }
-        if timer != nil { player.play() }
+        if playing { player.play() }
+        if pushing { schedulePush() }   // the rate is known now
     }
 
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
     }
 
+    /// Push mode: play and deliver each new frame through `onFrame`.
     func start() {
+        playing = true
+        pushing = true
         player.play()
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .milliseconds(1))
-        t.setEventHandler { [weak self] in self?.poll() }
-        t.resume()
-        timer = t
+        schedulePush()
+    }
+
+    /// Pull mode: play, and hand out frames from `pull()` as they are asked for.
+    func play() {
+        playing = true
+        player.play()
     }
 
     func stop() {
+        playing = false
+        pushing = false
         timer?.cancel()
         timer = nil
         player.pause()
     }
 
-    private func poll() {
+    /// The timer checks twice per movie frame, so no frame is missed and no
+    /// frame is delivered twice, at a quarter of the wakeups of a fixed fast poll.
+    private func schedulePush() {
+        timer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        let half = max(frameInterval / 2, 0.008)
+        t.schedule(deadline: .now(), repeating: half, leeway: .milliseconds(1))
+        t.setEventHandler { [weak self] in
+            guard let self, let pb = pull() else { return }
+            onFrame?(pb)
+        }
+        t.resume()
+        timer = t
+    }
+
+    /// The newest frame for this moment, or nil when the one before is still current.
+    func pull() -> CVPixelBuffer? {
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
-        guard output.hasNewPixelBuffer(forItemTime: itemTime),
-              let pb = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) else { return }
-        onFrame?(pb)
+        guard output.hasNewPixelBuffer(forItemTime: itemTime) else { return nil }
+        return output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil)
     }
 }

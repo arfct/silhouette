@@ -247,7 +247,7 @@ final class ControlsView: NSView {
     var onAutoKey: (() -> Void)?
 
     /// Option buttons drawn over the tiles.
-    private let supersampleButton = OverlayButton(text: "4K", tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work.")
+    private let supersampleButton = OverlayButton(text: "HD", tip: "HD keys at 1080p. 4K captures and keys at 3840×2160 when the camera supports it, then downsamples to the 1080p output: finer hair and edges, about four times the GPU work.")
     private let mirrorButton = OverlayButton(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right", tip: "Mirror the preview like a mirror. The sources, the layers, and the virtual camera output are never mirrored.")
     private let freezeButton = OverlayButton(symbol: "pause.fill", tip: "Freeze frame")
     private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
@@ -780,7 +780,7 @@ final class ControlsView: NSView {
             sourceTile.show(shown)
             scheduleSourceThumbnail()
         } else {
-            sourceTile.show(PickerItem(value: "", title: "No source", thumbnail: .symbol("video.slash")))
+            sourceTile.show(PickerItem(value: "", title: "None", thumbnail: .symbol("plus")))
         }
         if case .source? = pickerTarget { picker.update(sections: sections, selected: sourceSelection) }
     }
@@ -845,7 +845,11 @@ final class ControlsView: NSView {
         var item = layerItem(value, slot: slot)
         if case .image = item.thumbnail, value != Self.testPageTitle { item.thumbnail = .web(URL(string: value) ?? URL(string: "https://example.com")!) }
         if case .image = item.thumbnail, value == Self.testPageTitle { item.thumbnail = .symbol("face.smiling") }
-        (slot == .foreground ? foregroundTile : backgroundTile)?.show(item)
+        // On the tile, an empty layer shows a plus: an invitation to pick something.
+        if Self.layerKind(value) == .none { item.thumbnail = .symbol("plus") }
+        let tile = slot == .foreground ? foregroundTile : backgroundTile
+        tile?.show(item)
+        tile?.optionsHidden = Self.layerKind(value) == .none
         if case .layer(let s)? = pickerTarget, s == slot { picker.update(sections: layerSections(slot), selected: value) }
     }
 
@@ -972,7 +976,7 @@ final class ControlsView: NSView {
 
     var supersample: Bool {
         get { supersampleButton.isOn }
-        set { supersampleButton.isOn = newValue }
+        set { supersampleButton.isOn = newValue; supersampleButton.setText(newValue ? "4K" : "HD") }
     }
     var trackFace: Bool {
         get { trackSwitch.state == .on }
@@ -994,6 +998,7 @@ final class ControlsView: NSView {
 
     var sinkConnected: Bool = false {
         didSet {
+            guard sinkConnected != oldValue else { return }   // polled every second; relayout only on a change
             sinkStatus.stringValue = sinkConnected ? "Live" : "Not connected"
             sinkStatus.textColor = sinkConnected ? .labelColor : .secondaryLabelColor
             sinkDot.color = sinkConnected ? .systemGreen : .tertiaryLabelColor
@@ -1017,7 +1022,7 @@ final class ControlsView: NSView {
     // MARK: Actions
 
 
-    @objc private func supersampleChanged() { supersampleButton.isOn.toggle(); onSupersample?(supersampleButton.isOn) }
+    @objc private func supersampleChanged() { supersample.toggle(); onSupersample?(supersample) }
     @objc private func trackChanged() { refreshEnabledStates(); onTrackFace?(trackSwitch.state == .on) }
     @objc private func depthChanged() { onShadowFollowsFace?(depthSwitch.state == .on) }
     @objc private func shadowToggled() {

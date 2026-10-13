@@ -1,8 +1,8 @@
 import AppKit
 
-/// A circular button over a picture: a Liquid Glass circle (clear glass, as
-/// over video) on macOS 26, a dark translucent circle before that. The glyph
-/// is white; a toggle that is on turns the glass light with a dark glyph.
+/// A circular Liquid Glass button over a picture, in the clear style meant
+/// for controls over video. The glyph is white; a toggle that is on turns the
+/// glass light with a dark glyph.
 final class OverlayButton: NSView {
     static let size: CGFloat = 28
     /// Toggles show their state; plain buttons leave it off.
@@ -13,8 +13,8 @@ final class OverlayButton: NSView {
     override var toolTip: String? { didSet { button.toolTip = toolTip } }
 
     private let button = NSButton()
-    private var glass: NSView?
-    private let text: String?
+    private let glass = NSGlassEffectView()
+    private var text: String?
 
     init(symbol: String? = nil, text: String? = nil, tip: String) {
         self.text = text
@@ -29,22 +29,13 @@ final class OverlayButton: NSView {
         }
         button.setAccessibilityLabel(text ?? tip)
 
-        let host: NSView
-        if #available(macOS 26.0, *) {
-            let g = NSGlassEffectView()
-            g.style = .clear
-            g.cornerRadius = Self.size / 2
-            g.contentView = button
-            host = g
-            glass = g
-        } else {
-            wantsLayer = true
-            layer?.cornerRadius = Self.size / 2
-            addSubview(button)
-            host = button
-        }
-        host.translatesAutoresizingMaskIntoConstraints = false
-        if host !== button { addSubview(host) }
+        let g = glass
+        g.style = .clear
+        g.cornerRadius = Self.size / 2
+        g.contentView = button
+        g.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(g)
+        let host: NSView = g
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: Self.size),
             heightAnchor.constraint(equalToConstant: Self.size),
@@ -64,6 +55,12 @@ final class OverlayButton: NSView {
         updateLook()
     }
 
+    func setText(_ newText: String) {
+        text = newText
+        button.setAccessibilityLabel(newText)
+        updateLook()
+    }
+
     private func updateLook() {
         // Off: clear glass with a white glyph, which reads on video. On: light
         // glass with a dark glyph, so the state shows without a colour.
@@ -75,11 +72,7 @@ final class OverlayButton: NSView {
             button.attributedTitle = NSAttributedString(string: text, attributes: [
                 .font: NSFont.systemFont(ofSize: 10, weight: .heavy), .foregroundColor: glyph, .shadow: shadow])
         }
-        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
-            g.tintColor = isOn ? NSColor.white.withAlphaComponent(0.85) : NSColor.black.withAlphaComponent(0.25)
-        } else {
-            layer?.backgroundColor = (isOn ? NSColor.white.withAlphaComponent(0.9) : NSColor.black.withAlphaComponent(0.5)).cgColor
-        }
+        glass.tintColor = isOn ? NSColor.white.withAlphaComponent(0.85) : NSColor.black.withAlphaComponent(0.25)
         button.setAccessibilityValue(isOn ? "on" : "off")
     }
 }
@@ -98,6 +91,8 @@ final class LayerTile: NSView {
     private let title: String
     private let thumb = ThumbnailView(frame: .zero)
     private let options = NSStackView()
+    /// Hide the option buttons, e.g. while the layer has nothing chosen.
+    var optionsHidden = false { didSet { options.isHidden = optionsHidden } }
 
     init(title: String, options optionButtons: [NSView]) {
         self.title = title

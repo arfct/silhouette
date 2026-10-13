@@ -185,9 +185,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let statusMenu = NSMenu()
     /// The window is open (not closed; it may still be covered or minimised).
     private var windowOpen = true
-    /// Read on the render thread to skip handing frames to a closed window.
+    /// Read on the render thread: the preview is on screen, so frames go to it.
+    /// False while the window is closed, minimised, or covered, and then a
+    /// frame costs nothing beyond the render and the virtual camera.
     private let windowOpenLock = NSLock()
-    private var windowOpenForFrames = true
+    private var previewLiveForFrames = true
+    private var windowOccluded = false
     /// The freeze-frame timer skips rendering while idle.
     private var idleForFrames = false
     /// An app is streaming the virtual camera, as the extension reports it.
@@ -217,7 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let wantSample = analyzer != nil && CACurrentMediaTime() >= autoNextSample
             if wantSample { autoNextSample = CACurrentMediaTime() + Self.autoFrameSpacing }
             frameLock.unlock()
-            if !frozen { renderer.render(pixelBuffer) }   // frozen: the timer renders the held frame
+            if !frozen {
+                background.pullFrame(); foreground.pullFrame()   // movie layers advance with the camera, no timers
+                renderer.render(pixelBuffer)
+            }   // frozen: the timer renders the held frame
             if wantSample, let analyzer { autoQueue.async { [weak self] in self?.autoSample(pixelBuffer, into: analyzer) } }
         }
         controls.onFreeze = { [weak self] on in self?.setFrozen(on) }
@@ -227,8 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             faceTracker.process(small, camScale: m.scale, camOffset: m.offset)
         }
         renderer.onStats = { [weak self] fps, gpuMs, maskMs in
-            guard self?.windowOpen == true else { return }
-            self?.statsLabel.stringValue = maskMs > 0
+            guard let self, windowOpen, !windowOccluded else { return }
+            statsLabel.stringValue = maskMs > 0
                 ? String(format: "%.0f fps · GPU %.2f ms · mask %.1f ms", fps, gpuMs, maskMs)
                 : String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
         }
@@ -279,11 +285,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             settings.faceOverlay = on
             preview.showFaceOverlay = on
+            updateTrackingNeeds()
             settings.save()
         }
         faceTracker.onUpdate = { [weak self] state in
             guard let self else { return }
-            if windowOpen { preview.showFace(state) }
+            if windowOpen && !windowOccluded { preview.showFace(state) }
             renderer.setFace(state)
             background.send(face: state)
             foreground.send(face: state)
@@ -296,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         restoreLayer(.background)
         restoreLayer(.foreground)
+        updateTrackingNeeds()
         controls.apply(params: renderer.keyParams)
         updateWindowChrome()
         startCamera()
@@ -340,6 +348,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
     }
 
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        windowOccluded = !window.occlusionState.contains(.visible)
+        updatePreviewLive()
+    }
+
+    /// Whether frames should reach the preview at all.
+    private func updatePreviewLive() {
+        let live = windowOpen && !windowOccluded
+        windowOpenLock.lock(); previewLiveForFrames = live; windowOpenLock.unlock()
+        if live { preview.display(surface: displayedBuffer.flatMap { CVPixelBufferGetIOSurface($0)?.takeUnretainedValue() }) }
+    }
+
     @objc private func showMainWindow() {
         NSApp.setActivationPolicy(.regular)
         setWindowOpen(true)
@@ -349,7 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func setWindowOpen(_ open: Bool) {
         windowOpen = open
-        windowOpenLock.lock(); windowOpenForFrames = open; windowOpenLock.unlock()
+        updatePreviewLive()
         if !open { controls.closePicker() }
         updateIdle()
         updateStatusItem()
@@ -403,15 +423,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleOutput(_ buffer: CVPixelBuffer) {
         sink.send(buffer)
-        windowOpenLock.lock(); let showing = windowOpenForFrames; windowOpenLock.unlock()
-        guard showing else { return }   // window closed: the frame only goes to the virtual camera
-        let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
-        DispatchQueue.main.async { [self] in
-            // Nothing to show while the window is hidden, minimised, or covered.
-            guard window.occlusionState.contains(.visible) else { return }
-            displayedBuffer = buffer
-            preview.display(surface: surface)
-        }
+        windowOpenLock.lock()
+        let showing = previewLiveForFrames
+        if showing { displayedBuffer = buffer }   // keeps the surface alive while the layer shows it
+        windowOpenLock.unlock()
+        guard showing else { return }   // closed, minimised, or covered: the frame only goes to the virtual camera
+        // Straight onto the layer from this thread: no main-thread hop per frame.
+        preview.display(surface: CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue())
     }
 
     private func pollSink() {
@@ -688,6 +706,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// With no background the keyed camera sits on a checkerboard; with one the composite covers it.
     private func updateWindowChrome() {
         preview.backdrop = background.mode == .none ? .checkerboard : .black
+        updateTrackingNeeds()
+    }
+
+    /// Landmarks are worth their Neural Engine pass only when something shows
+    /// them: a web page layer or the preview overlay.
+    private func updateTrackingNeeds() {
+        faceTracker.needsLandmarks = background.mode == .web || foreground.mode == .web || settings.faceOverlay
+        applyTrackingRate()
     }
 
     // MARK: Params
@@ -709,7 +735,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             frameLock.lock(); let frame = frozenFrame; frameLock.unlock()
             windowOpenLock.lock(); let idle = idleForFrames; windowOpenLock.unlock()
-            if let frame, !idle { renderer.render(frame) }
+            if let frame, !idle {
+                background.pullFrame(); foreground.pullFrame()
+                renderer.render(frame)
+            }
         }
         freezeTimer = timer
         timer.resume()
@@ -790,7 +819,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// One line on whether the current camera can do this.
     private func appleChromakeyStatus() -> String {
-        guard #available(macOS 15.0, *) else { return "The Background effect needs macOS 15 or later." }
         guard let device = camera.currentDevice else { return "Choose a camera first: movies and the test pattern have no Video Effects." }
         guard device.activeFormat.isBackgroundReplacementSupported else {
             return "\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do."
@@ -804,7 +832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func watchSystemBackground() {
         backgroundEffectObservation = nil
-        guard armSystemBackgroundAuto, #available(macOS 15.0, *), let device = camera.currentDevice,
+        guard armSystemBackgroundAuto, let device = camera.currentDevice,
               device.activeFormat.isBackgroundReplacementSupported else { return }
         if device.isBackgroundReplacementActive {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
@@ -929,9 +957,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static let sampleVideoURL = Bundle.main.url(forResource: "Sample", withExtension: "mp4")
 
     /// 15 Hz with a detection every fourth tracked frame, or 30 Hz with one every other.
+    /// With landmarks in use: 15 Hz with a detection every fourth tracked frame,
+    /// or 30 Hz with one every other. Detector only (no web layer, no overlay):
+    /// about six detections a second, which the eased shadow and relight
+    /// cannot tell from more, at a fifth of the Neural Engine work.
     private func applyTrackingRate() {
-        renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
-        faceTracker.detectEvery = settings.faceHighRate ? 2 : 4
+        if faceTracker.needsLandmarks {
+            renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
+            faceTracker.detectEvery = settings.faceHighRate ? 2 : 4
+        } else {
+            renderer.trackingDivisor = 5
+            faceTracker.detectEvery = 1
+        }
     }
 
     /// Face height relative to the frame → shadow multiplier, eased so
@@ -1124,30 +1161,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         splitController.addSplitViewItem(sidebarItem)
         splitController.addSplitViewItem(NSSplitViewItem(viewController: contentController))
 
-        // The whole window is one sheet of Liquid Glass (macOS 26); older systems
-        // get the closest material. Both panes sit on it with no backdrop of their own.
+        // The whole window is one sheet of Liquid Glass. Both panes sit on it
+        // with no backdrop of their own.
         let root = NSViewController()
-        let backdrop: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .regular
-            glass.contentView = splitController.view
-            backdrop = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = .sidebar
-            effect.blendingMode = .behindWindow
-            effect.state = .followsWindowActiveState
-            splitController.view.translatesAutoresizingMaskIntoConstraints = false
-            effect.addSubview(splitController.view)
-            NSLayoutConstraint.activate([
-                splitController.view.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-                splitController.view.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-                splitController.view.topAnchor.constraint(equalTo: effect.topAnchor),
-                splitController.view.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            ])
-            backdrop = effect
-        }
+        let glass = NSGlassEffectView()
+        glass.style = .regular
+        glass.contentView = splitController.view
+        let backdrop: NSView = glass
         root.view = backdrop
         root.addChild(splitController)
         window.isOpaque = false

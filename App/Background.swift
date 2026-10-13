@@ -27,8 +27,9 @@ final class BackgroundController: NSObject {
     var paused = false {
         didSet {
             guard paused != oldValue else { return }
-            if paused { stopSnapshots(); videoSource?.stop() }
-            else { if mode == .web { startSnapshots() }; videoSource?.start() }
+            videoLock.lock(); let source = videoSource; videoLock.unlock()
+            if paused { stopSnapshots(); source?.stop() }
+            else { if mode == .web { startSnapshots() }; source?.play() }
         }
     }
     private var snapshotInFlight = false
@@ -39,6 +40,9 @@ final class BackgroundController: NSObject {
     private var unchangedCount = 0
     private var uploadTextures: [MTLTexture] = []
     private var uploadIndex = 0
+    /// Movie layer state, touched from the main thread (set up, clear) and the
+    /// camera thread (`pullFrame`), so it is guarded.
+    private let videoLock = NSLock()
     private var videoSource: VideoFileSource?
     private var videoTextureCache: CVMetalTextureCache?
     private var videoTextures: [CVMetalTexture] = []   // keep the frame alive while sampled
@@ -158,8 +162,24 @@ final class BackgroundController: NSObject {
     }
 
     private func stopVideo() {
+        videoLock.lock()
         videoSource?.stop()
         videoSource = nil
+        videoTextures = []
+        videoLock.unlock()
+    }
+
+    /// Called once per rendered frame, before the render: take the movie's
+    /// frame for now, if it has a new one. No timer, no wakeups of its own.
+    func pullFrame() {
+        videoLock.lock(); defer { videoLock.unlock() }
+        guard let videoSource, let cache = videoTextureCache, let pb = videoSource.pull() else { return }
+        var cv: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm,
+                                                  CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &cv)
+        guard let cv, let tex = CVMetalTextureGetTexture(cv) else { return }
+        videoTextures = Array((videoTextures + [cv]).suffix(3))
+        setTexture(tex)
     }
 
     /// A looping movie as the background. Frames are decoded in hardware as
@@ -172,17 +192,8 @@ final class BackgroundController: NSObject {
         webView.isHidden = true
         if videoTextureCache == nil { CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, renderer.device, nil, &videoTextureCache) }
         let source = VideoFileSource(url: url, pixelFormat: kCVPixelFormatType_32BGRA)
-        source.onFrame = { [weak self] pb in
-            guard let self, let cache = videoTextureCache else { return }
-            var cv: CVMetalTexture?
-            CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm,
-                                                      CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &cv)
-            guard let cv, let tex = CVMetalTextureGetTexture(cv) else { return }
-            videoTextures = Array((videoTextures + [cv]).suffix(3))
-            setTexture(tex)
-        }
-        videoSource = source
-        if !paused { source.start() }
+        videoLock.lock(); videoSource = source; videoLock.unlock()
+        if !paused { source.play() }
     }
 
     func setImage(url: URL) {

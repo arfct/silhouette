@@ -53,7 +53,7 @@ Your video is processed on your Mac and goes only to the apps you choose. Silhou
 
 Also included: a test pattern and movie-file input for setting up without a camera, a mirrored preview, light and dark appearance, and built-in help.
 
-Requires a physical green or blue backdrop and macOS 14 or later.
+Requires macOS 26 or later. A physical green or blue backdrop gives the best results; Background Removal works without one.
 
 ## Support URL
 
