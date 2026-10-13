@@ -248,7 +248,7 @@ final class ControlsView: NSView {
 
     /// Option buttons drawn over the tiles.
     private let supersampleButton = OverlayButton(text: "4K", tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work.")
-    private let mirrorButton = OverlayButton(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right", tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored.")
+    private let mirrorButton = OverlayButton(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right", tip: "Mirror the preview like a mirror. The sources, the layers, and the virtual camera output are never mirrored.")
     private let freezeButton = OverlayButton(symbol: "pause.fill", tip: "Freeze frame")
     private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
     private let fgBlendButton = OverlayButton(symbol: "camera.filters", tip: "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top.")
@@ -261,16 +261,6 @@ final class ControlsView: NSView {
     let layerStrip = NSStackView()
     /// Mirror and Pause, which the window places on the preview's bottom-right corner.
     let previewButtons = NSStackView()
-    /// Mirroring applies to live cameras only; for movies and the test pattern the button dims.
-    var mirrorAvailable = true {
-        didSet {
-            mirrorButton.isEnabled = mirrorAvailable
-            mirrorButton.alphaValue = mirrorAvailable ? 1 : 0.4
-            mirrorButton.toolTip = mirrorAvailable
-                ? "Mirror the preview like a mirror. The virtual camera output and the source are never mirrored."
-                : "Movies and the test pattern always show as recorded. Mirroring applies to live cameras."
-        }
-    }
     private let picker = PickerPopover()
     private enum PickerTarget { case source, layer(LayerSlot) }
     private var pickerTarget: PickerTarget?
@@ -587,7 +577,7 @@ final class ControlsView: NSView {
         highRateLabel.toolTip = highRateSwitch.toolTip
         highRateLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         highRateRow = NSStackView(views: [highRateLabel, highRateSwitch]); (highRateRow as! NSStackView).spacing = 6
-        stack.addArrangedSubview(group("Face tracking", trailing: trackSwitch, rows: [overlayRow, highRateRow], tip: trackSwitch.toolTip))
+        stack.addArrangedSubview(group("Face tracking", trailing: trackSwitch, rows: [highRateRow, overlayRow], tip: trackSwitch.toolTip))
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false

@@ -1,59 +1,84 @@
 import AppKit
 
-/// A circular button over a tile's picture: Liquid Glass on macOS 26, a dark
-/// translucent circle before that. Toggles tint with the accent colour while on.
-final class OverlayButton: NSButton {
+/// A circular button over a picture: a Liquid Glass circle (clear glass, as
+/// over video) on macOS 26, a dark translucent circle before that. The glyph
+/// is white; a toggle that is on tints the glass with the accent colour.
+final class OverlayButton: NSView {
     static let size: CGFloat = 28
     /// Toggles show their state; plain buttons leave it off.
     var isOn = false { didSet { updateLook() } }
-    private let glass: Bool
+    var target: AnyObject? { get { button.target } set { button.target = newValue } }
+    var action: Selector? { get { button.action } set { button.action = newValue } }
+    var isEnabled: Bool { get { button.isEnabled } set { button.isEnabled = newValue } }
+    override var toolTip: String? { didSet { button.toolTip = toolTip } }
+
+    private let button = NSButton()
+    private var glass: NSView?
+    private let text: String?
 
     init(symbol: String? = nil, text: String? = nil, tip: String) {
-        if #available(macOS 26.0, *) { glass = true } else { glass = false }
+        self.text = text
         super.init(frame: .zero)
-        title = text ?? ""
+        translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.title = ""
+        button.translatesAutoresizingMaskIntoConstraints = false
         if let symbol {
-            image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
-            symbolConfiguration = .init(pointSize: 12, weight: .semibold)
-            imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+            button.imagePosition = .imageOnly
         }
-        font = .systemFont(ofSize: 10, weight: .bold)
+        button.setAccessibilityLabel(text ?? tip)
+
+        let host: NSView
         if #available(macOS 26.0, *) {
-            bezelStyle = .glass
-            borderShape = .circle
+            let g = NSGlassEffectView()
+            g.style = .clear
+            g.cornerRadius = Self.size / 2
+            g.contentView = button
+            host = g
+            glass = g
         } else {
-            isBordered = false
             wantsLayer = true
             layer?.cornerRadius = Self.size / 2
+            addSubview(button)
+            host = button
         }
+        host.translatesAutoresizingMaskIntoConstraints = false
+        if host !== button { addSubview(host) }
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.size),
+            heightAnchor.constraint(equalToConstant: Self.size),
+            host.leadingAnchor.constraint(equalTo: leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: trailingAnchor),
+            host.topAnchor.constraint(equalTo: topAnchor),
+            host.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
         toolTip = tip
-        setAccessibilityLabel(text ?? tip)
-        translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: Self.size).isActive = true
-        heightAnchor.constraint(equalToConstant: Self.size).isActive = true
         updateLook()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func setSymbol(_ name: String, description: String) {
-        image = NSImage(systemSymbolName: name, accessibilityDescription: description)
+        button.image = NSImage(systemSymbolName: name, accessibilityDescription: description)
+        updateLook()
     }
 
     private func updateLook() {
-        if glass {
-            bezelColor = isOn ? .controlAccentColor : nil
-            // Glass ignores the content tint for glyphs, so colour them directly: white on the accent.
-            let base = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-            symbolConfiguration = isOn ? base.applying(.init(paletteColors: [.white])) : base
-            let font = self.font ?? .systemFont(ofSize: 10, weight: .bold)
-            attributedTitle = NSAttributedString(string: title, attributes: [.font: font, .foregroundColor: isOn ? NSColor.white : NSColor.labelColor])
+        // White glyphs read on video; a soft shadow keeps them legible over white clothing.
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
+            .applying(.init(paletteColors: [.white]))
+        if let text {
+            let shadow = NSShadow(); shadow.shadowColor = .black.withAlphaComponent(0.5); shadow.shadowBlurRadius = 2
+            button.attributedTitle = NSAttributedString(string: text, attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .heavy), .foregroundColor: NSColor.white, .shadow: shadow])
+        }
+        if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
+            g.tintColor = isOn ? .controlAccentColor : NSColor.black.withAlphaComponent(0.25)
         } else {
             layer?.backgroundColor = (isOn ? NSColor.controlAccentColor : NSColor.black.withAlphaComponent(0.5)).cgColor
-            contentTintColor = .white
-            attributedTitle = NSAttributedString(string: title, attributes: [.font: font ?? .systemFont(ofSize: 10), .foregroundColor: NSColor.white])
         }
-        setAccessibilityValue(isOn ? "on" : "off")
+        button.setAccessibilityValue(isOn ? "on" : "off")
     }
 }
 

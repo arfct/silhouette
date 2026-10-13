@@ -914,14 +914,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controls.showKeyHint(text, for: 8)
     }
 
-    /// Mirror the preview only for live cameras, where it should behave like a
-    /// mirror. Movies and the test pattern show as recorded. The output is never mirrored.
+    /// Mirror the preview when the Mirror button is on, whatever the source.
+    /// Sources, layers, and the virtual camera output are never mirrored.
     private func updatePreviewMirror() {
-        let liveCamera = !camera.usingTestPattern && camera.currentVideoURL == nil
-        let mirrored = settings.mirrorPreview && liveCamera
+        let mirrored = settings.mirrorPreview
         preview.mirrored = mirrored
         controls.mirrorOffsetPad = mirrored
-        controls.mirrorAvailable = liveCamera
         background.previewMirrored = mirrored
         foreground.previewMirrored = mirrored
     }
