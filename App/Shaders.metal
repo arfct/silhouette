@@ -24,6 +24,21 @@ struct KeyParams {
     float2 fgOffset;
     float  hasForeground;  // 1 = composite fgTex (premultiplied) over everything
     float  personMode;     // 1 = the matte comes from maskTex (person segmentation), not chroma
+    float  temperature;    // colour temperature shift for the camera pixels only: -1 cool … +1 warm
+    float  fgMasked;       // 1 = the foreground layer shows only over the subject (multiplied by the matte)
+    float  relight;        // 0…1 strength of the background's light on the subject
+    float  highlights;     // 0 only tints lit areas … 1 also brightens them
+    float  hasFace;        // 1 when faceEllipse and faceForward are valid
+    float  aspect;         // output width / height, to measure uv directions isotropically
+    float  wrapRows;       // rows in the row-extents buffer (the soft matte's height)
+    float  illumReset;     // 1 = the illumination map starts over (no previous frame to ease from)
+    float4 faceEllipse;    // head ellipse in output uv: centre xy, radii zw
+    float4 faceForward;    // unit vector the face points along, camera space (x right, y up, z away from the camera)
+    float4 light0;         // xy: position in output uv, z: brightness 0…1
+    float4 light0Color;    // rgb with the largest channel 1
+    float4 light1;
+    float4 light1Color;
+    float  fgBlend;        // foreground blend mode: 0 normal, else see blendForeground
 };
 
 struct VSOut {
@@ -221,6 +236,28 @@ fragment float4 mattePass(VSOut in [[stage_in]],
     return float4(a, 0.0, 0.0, 1.0);
 }
 
+// Blend-mode formulas B(cb, cs) from the W3C compositing spec, per channel.
+static inline float3 blendForeground(int mode, float3 cb, float3 cs) {
+    switch (mode) {
+    case 1: return cb * cs;                                                  // multiply
+    case 2: return cb + cs - cb * cs;                                        // screen
+    case 3: return select(cs + (cb * 2.0 - 1.0) - cs * (cb * 2.0 - 1.0), cs * cb * 2.0, cb <= 0.5);   // overlay = hard light, operands swapped
+    case 4: {                                                                // soft light
+        float3 d = select(sqrt(cb), ((cb * 16.0 - 12.0) * cb + 4.0) * cb, cb <= 0.25);
+        return select(cb + (cs * 2.0 - 1.0) * (d - cb), cb - (1.0 - cs * 2.0) * cb * (1.0 - cb), cs <= 0.5);
+    }
+    case 5: return select(cb + (cs * 2.0 - 1.0) - cb * (cs * 2.0 - 1.0), cb * cs * 2.0, cs <= 0.5);   // hard light
+    case 6: return select(min(float3(1.0), cb / max(1.0 - cs, 1e-4)), float3(0.0), cb <= 0.0);       // colour dodge
+    case 7: return select(1.0 - min(float3(1.0), (1.0 - cb) / max(cs, 1e-4)), float3(1.0), cb >= 1.0); // colour burn
+    case 8: return min(cb + cs, 1.0);                                        // add (linear dodge)
+    case 9: return max(cb, cs);                                              // lighten
+    case 10: return min(cb, cs);                                             // darken
+    case 11: return abs(cb - cs);                                            // difference
+    case 12: return cb + cs - cb * cs * 2.0;                                 // exclusion
+    default: return cs;
+    }
+}
+
 // Keys directly in the camera's native YCbCr (4:2:0 bi-planar) so no colour
 // conversion happens before the key, then converts to RGB once.
 fragment float4 chromaKey(VSOut in [[stage_in]],
@@ -231,6 +268,7 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                           texture2d<float> matteTex  [[texture(4)]],
                           texture2d<float> fgTex     [[texture(5)]],
                           texture2d<float> bgEstTex  [[texture(6)]],
+                          texture2d<float> illumTex  [[texture(7)]],
                           constant KeyParams &P      [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
@@ -282,6 +320,24 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                                  y - 0.1873 * cb - 0.4681 * cr,
                                  y + 1.8556 * cb));
 
+    // Colour temperature, camera pixels only: a white-balance gain on red and
+    // blue, renormalised so brightness does not change. Layers are untouched.
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+    if (P.temperature != 0.0 && P.bypass < 0.5) {
+        float t = P.temperature * 0.22;
+        float3 shifted = rgb * float3(1.0 + t, 1.0, 1.0 - t);
+        float before = dot(rgb, lumaWeights), after = dot(shifted, lumaWeights);
+        rgb = saturate(shifted * (before / max(after, 1e-4)));
+    }
+
+    // Relight: multiply by the illumination map (see relightMap), which is
+    // low resolution, blurred, and eased frame to frame, so the light is soft
+    // and arrives gradually. rgb is the tint factor, a the light amount.
+    if (P.relight > 0.0 && P.bypass < 0.5) {
+        float4 f = illumTex.sample(s, in.uv);
+        rgb = saturate(rgb * f.rgb * (1.0 + P.highlights * f.a));
+    }
+
     // Everything below is premultiplied. The shadow is black, so over the
     // background it darkens colour and adds coverage where the background is clear.
     float4 out;
@@ -295,9 +351,166 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     }
     if (P.hasForeground > 0.5) {
         float4 fg = fgTex.sample(s, in.uv * P.fgScale + P.fgOffset);
-        out = fg + out * (1.0 - fg.a);
+        if (P.fgMasked > 0.5) fg *= a;   // premultiplied, so one multiply confines it to the subject
+        if (P.fgBlend > 0.5 && fg.a > 1e-4) {
+            // Separable blend modes as in the W3C compositing spec: the source
+            // colour is replaced by its blend with the backdrop where there is
+            // backdrop, then composited over as normal.
+            float3 cs = fg.rgb / fg.a;
+            float3 cb = out.a > 1e-4 ? out.rgb / out.a : float3(0.0);
+            float3 mixed = (1.0 - out.a) * cs + out.a * blendForeground(int(P.fgBlend + 0.5), cb, cs);
+            out = float4(fg.a * mixed + (1.0 - fg.a) * out.rgb, fg.a + out.a * (1.0 - fg.a));
+        } else {
+            out = fg + out * (1.0 - fg.a);
+        }
     }
     return out;
+}
+
+// Shrinks a texture to the destination size by averaging an 8×8 grid of
+// bilinear taps per destination texel: evenly spread, so no source region is
+// skipped, and far cheaper than a proper filter for a 60:1 reduction. Used
+// for the relight's light map and soft matte, which are blurred afterwards.
+kernel void shrinkGrid(texture2d<float, access::sample> src [[texture(0)]],
+                       texture2d<float, access::write> dst [[texture(1)]],
+                       uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 cell = 1.0 / float2(dst.get_width(), dst.get_height());
+    float2 origin = float2(gid) * cell;
+    float4 sum = 0.0;
+    for (int j = 0; j < 8; j++) {
+        for (int i = 0; i < 8; i++) {
+            sum += src.sample(s, origin + (float2(i, j) + 0.5) / 8.0 * cell);
+        }
+    }
+    dst.write(sum / 64.0, gid);
+}
+
+
+// The relight's illumination map, at a fraction of the output size: for each
+// point, how much of which colour the background's lights put there, eased
+// toward the previous frame's map so lighting arrives over a second or so.
+// The composite multiplies the camera pixel by rgb and brightens by a.
+// Lighting comes from the two brightest regions of the background (one per
+// half, so a left/right bias in the background lights the matching side)
+// plus light wrap along the edge. Normals: the head is a sphere fitted to
+// the face box, with a term for the direction the face points; the rest of
+// the silhouette is taken to be body shaped, a cylinder per row spanning the
+// silhouette's extent on that row, so the side nearer a light faces it.
+fragment float4 relightMap(VSOut in [[stage_in]],
+                           texture2d<float> lightTex [[texture(0)]],
+                           texture2d<float> wrapTex  [[texture(1)]],
+                           texture2d<float> prevTex  [[texture(2)]],
+                           constant KeyParams &P     [[buffer(0)]],
+                           constant float2 *rowExtents [[buffer(1)]])
+{
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+    float3 local = lightTex.sample(s, in.uv * P.bgScale + P.bgOffset).rgb;
+    float inside = wrapTex.sample(s, in.uv).r;
+    float3 lightSum = 0.0;
+    float kSum = 0.0;
+
+    // Wrap: the background's local colour where the soft matte is thin.
+    float wrap = 1.0 - smoothstep(0.0, 0.85, inside);
+    float kw = 0.7 * wrap * smoothstep(0.04, 0.35, dot(local, lumaWeights));
+    lightSum += local * kw; kSum += kw;
+
+    // Body normal from this row's silhouette extent, interpolated between rows.
+    float rows = max(P.wrapRows, 1.0);
+    float rowf = clamp(in.uv.y * rows - 0.5, 0.0, rows - 1.0);
+    int r0 = int(rowf), r1 = min(r0 + 1, int(rows) - 1);
+    float2 ext = mix(rowExtents[r0], rowExtents[r1], rowf - float(r0));
+    float3 n = float3(0.0, 0.0, -1.0);
+    float halfW = (ext.y - ext.x) * 0.5;
+    if (halfW > 0.004) {
+        float u = clamp((in.uv.x - (ext.x + ext.y) * 0.5) / halfW, -1.0, 1.0);
+        n = float3(u, 0.0, -sqrt(1.0 - u * u));
+    }
+
+    // Head: blend the normal toward a sphere over the face, fading out well
+    // before the ellipse's rim so there is no seam against the body.
+    float headWeight = 0.0;
+    if (P.hasFace > 0.5) {
+        float2 d = (in.uv - P.faceEllipse.xy) / P.faceEllipse.zw;
+        float r2 = dot(d, d);
+        if (r2 < 1.0) {
+            headWeight = 1.0 - smoothstep(0.2, 1.0, r2);
+            n = normalize(mix(n, float3(d.x, -d.y, -sqrt(1.0 - r2)), headWeight));
+        }
+    }
+
+    for (int i = 0; i < 2; i++) {
+        float4 L = i == 0 ? P.light0 : P.light1;
+        float3 C = i == 0 ? P.light0Color.rgb : P.light1Color.rgb;
+        if (L.z <= 0.0) continue;
+        // From this point toward the light, a little in front so side lights reach the front.
+        float3 dir = normalize(float3((L.x - in.uv.x) * P.aspect, -(L.y - in.uv.y), -0.25));
+        float lambert = max(dot(n, dir), 0.0);
+        float g = 0.55 * lambert * lambert;
+        if (headWeight > 0.0) g += 0.25 * max(dot(P.faceForward.xyz, dir), 0.0) * headWeight;
+        g *= L.z;
+        lightSum += C * g; kSum += g;
+    }
+
+    float4 fresh = float4(1.0, 1.0, 1.0, 0.0);
+    if (kSum > 1e-4) {
+        float3 tint = lightSum / max(max(lightSum.r, max(lightSum.g, lightSum.b)), 1e-4);
+        float k = min(kSum, 1.0) * P.relight;
+        fresh = float4(mix(float3(1.0), tint, k), k);
+    }
+    if (P.illumReset > 0.5) return fresh;
+    return mix(prevTex.sample(s, in.uv), fresh, 0.08);   // about half a second to settle
+}
+
+// For each row of the soft matte, the leftmost and rightmost columns that are
+// inside the subject, as fractions of the width. The relight treats the span
+// as a cylinder. A row with no subject gets a zero-width span.
+kernel void rowExtents(texture2d<float, access::read> inside [[texture(0)]],
+                       device float2 *rows [[buffer(0)]],
+                       uint row [[thread_position_in_grid]])
+{
+    uint w = inside.get_width(), h = inside.get_height();
+    if (row >= h) return;
+    int l = -1, r = -1;
+    for (uint x = 0; x < w; x++) {
+        if (inside.read(uint2(x, row)).r > 0.5) { if (l < 0) l = int(x); r = int(x); }
+    }
+    rows[row] = l < 0 ? float2(0.5, 0.5) : float2(float(l) / float(w), float(r + 1) / float(w));
+}
+
+// Average colour of the subject (matte-weighted camera chroma) and of the
+// background layer, on a coarse grid, summed into fixed-point counters. The
+// CPU turns the two means into an automatic temperature setting.
+kernel void colorStats(texture2d<float> lumaTex   [[texture(0)]],
+                       texture2d<float> chromaTex [[texture(1)]],
+                       texture2d<float> matteTex  [[texture(2)]],
+                       texture2d<float> bgTex     [[texture(3)]],
+                       device atomic_uint *sums   [[buffer(1)]],
+                       constant KeyParams &P      [[buffer(0)]],
+                       uint2 gid [[thread_position_in_grid]],
+                       uint2 grid [[threads_per_grid]])
+{
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(grid);
+    float2 cuv = uv * P.camScale + P.camOffset;
+    float a = matteTex.sample(s, uv).r;
+    float2 cbcr = fullRangeChroma(chromaTex.sample(s, cuv).rg, P);
+    const float scale = 1024.0;
+    atomic_fetch_add_explicit(&sums[0], uint(a * cbcr.x * scale), memory_order_relaxed);
+    atomic_fetch_add_explicit(&sums[1], uint(a * cbcr.y * scale), memory_order_relaxed);
+    atomic_fetch_add_explicit(&sums[2], uint(a * scale), memory_order_relaxed);
+    if (P.hasBackground > 0.5) {
+        float4 bg = bgTex.sample(s, uv * P.bgScale + P.bgOffset);
+        float3 c = bg.a > 1e-3 ? bg.rgb / bg.a : float3(0.0);   // premultiplied
+        float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        float cb = (c.b - y) / 1.8556 + 0.5, cr = (c.r - y) / 1.5748 + 0.5;
+        atomic_fetch_add_explicit(&sums[3], uint(bg.a * cb * scale), memory_order_relaxed);
+        atomic_fetch_add_explicit(&sums[4], uint(bg.a * cr * scale), memory_order_relaxed);
+        atomic_fetch_add_explicit(&sums[5], uint(bg.a * scale), memory_order_relaxed);
+    }
 }
 
 // 2x2 box downsample: one bilinear tap at the centre of each 2x2 block

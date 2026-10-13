@@ -58,6 +58,7 @@ struct Settings: Codable {
     var fileBookmarks: [String: Data] = [:]
     var chromakeyOpen = false
     var matteSource: Renderer.MatteSource = .chroma
+    var temperatureAuto = false
     /// The layer over the keyed camera. The background keeps its original top-level keys.
     var foreground = LayerSettings()
 
@@ -113,6 +114,7 @@ struct Settings: Codable {
         // Keep only well-formed entries (a host with a dot, or localhost).
         chromakeyOpen = (try? c.decodeIfPresent(Bool.self, forKey: .chromakeyOpen)) ?? false
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
+        temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
             if $0.hasPrefix("/") || $0.hasPrefix("#") { return true }
             guard let host = URL(string: $0)?.host else { return false }
@@ -214,6 +216,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         renderer.matteSource = settings.matteSource
         controls.matteSource = settings.matteSource.rawValue
+        renderer.temperatureAuto = settings.temperatureAuto
+        controls.temperatureAuto = settings.temperatureAuto
+        controls.onTemperatureAuto = { [weak self] on in
+            guard let self else { return }
+            settings.temperatureAuto = on
+            renderer.temperatureAuto = on
+            if !on {   // the value auto settled on stays as the manual value
+                controls.apply(params: renderer.keyParams)
+            }
+            settings.save()
+        }
+        renderer.onAutoTemperature = { [weak self] value in self?.controls.showTemperature(value) }
         controls.onOpenVideoEffects = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
         controls.onSaveGreenImage = { [weak self] in self?.saveGreenImage() }
         controls.onMatteSource = { [weak self] raw in
@@ -256,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         faceTracker.onUpdate = { [weak self] state in
             guard let self else { return }
             preview.showFace(state)
+            renderer.setFace(state)
             background.send(face: state)
             foreground.send(face: state)
             updateShadowDepth(with: state)

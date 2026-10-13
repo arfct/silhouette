@@ -223,6 +223,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onFaceOverlay: ((Bool) -> Void)?
     /// 0 = chroma key, 1 = person segmentation.
     var onMatteSource: ((Int) -> Void)?
+    var onTemperatureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -250,6 +251,14 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
     private let freezeButton = NSButton(title: "", target: nil, action: nil)
+    private let temperatureAutoSwitch = NSButton()
+    private let colorSwitch = NSSwitch()
+    private let fgMaskSwitch = NSSwitch()
+    private let fgBlendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Foreground blend modes, in the shader's order; Normal is 0.
+    static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
+    private var colorBody: NSView!
+    private var temperatureCell: NSView!
     private var overlayRow: NSView!
     private let highRateSwitch = NSSwitch()
     private var highRateRow: NSView!
@@ -381,7 +390,25 @@ final class ControlsView: NSView, NSComboBoxDelegate {
             field.toolTip = "What shows \(what): nothing, the bundled test page, a web page URL, an image or movie file, or a hex colour like #1E90FF (8 digits for alpha). Pick from the list or type and press Return."
         }
         rebuildURLItems()
-        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [labeled("Background", urlField), labeled("Foreground", fgField)]))
+        fgMaskSwitch.target = self; fgMaskSwitch.action = #selector(fgMaskToggled)
+        fgBlendPopup.addItems(withTitles: Self.blendModes)
+        fgBlendPopup.controlSize = .small
+        fgBlendPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        fgBlendPopup.target = self; fgBlendPopup.action = #selector(fgBlendModeChanged)
+        fgBlendPopup.toolTip = "How the foreground combines with what is under it, as in an image editor. Normal lays it on top."
+        fgBlendPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let blendLabel = NSTextField(labelWithString: "Blend")
+        blendLabel.font = .systemFont(ofSize: 12)
+        blendLabel.toolTip = fgBlendPopup.toolTip
+        let blendRow = NSStackView(views: [blendLabel, fgBlendPopup]); blendRow.spacing = 5
+        blendRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let fgOptions = NSStackView(views: [
+            inlineSwitch("Mask", fgMaskSwitch, tip: "Confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything."),
+            blendRow,
+        ])
+        fgOptions.spacing = 12
+        fgOptions.distribution = .fill
+        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [labeled("Background", urlField), labeled("Foreground", fgField), fgOptions]))
 
         // Key: swatch, Pick and Auto in the header; range and spill below.
         keySwatch.isBordered = false
@@ -450,6 +477,38 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         chromaDisclosure.action = #selector(chromaToggled)
         chromaDisclosure.toolTip = "Show or hide the chromakey controls"
         stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
+
+        // Colour: corrections applied to the keyed camera image only, after the matte.
+        colorSwitch.target = self; colorSwitch.action = #selector(colorToggled)
+        colorSwitch.controlSize = .mini
+        colorSwitch.toolTip = "Apply the colour corrections. Off leaves your image's colour as the camera sends it."
+        temperatureAutoSwitch.setButtonType(.pushOnPushOff)
+        temperatureAutoSwitch.bezelStyle = .rounded
+        temperatureAutoSwitch.controlSize = .small
+        temperatureAutoSwitch.title = "Auto"
+        temperatureAutoSwitch.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        temperatureAutoSwitch.target = self; temperatureAutoSwitch.action = #selector(temperatureAutoChanged)
+        temperatureAutoSwitch.toolTip = "Match the background: measure the background's average colour and shift your image's temperature toward it. Off, set it yourself."
+        temperatureAutoSwitch.setContentHuggingPriority(.required, for: .horizontal)
+        let temperatureCell = sliderCell("Temperature", \.temperature, -1...1, scale: 100, decimals: 0,
+                                         tip: "Colour temperature of your image only. Left is cooler (bluer), right is warmer (more amber). Brightness stays the same. Layers are not affected.")
+        self.temperatureCell = temperatureCell
+        let temperatureRow = NSStackView(views: [temperatureCell, temperatureAutoSwitch])
+        temperatureRow.spacing = 8
+        temperatureRow.alignment = .bottom   // the button sits level with the slider, not the title
+        let relightRow = columns([
+            sliderCell("Relight", \.relight, 0...1, scale: 100, decimals: 0,
+                       tip: "Lets the background light you: its colour wraps around your edges, and its brightest areas light your head from their direction, following where you face when face tracking is on. Needs a background layer."),
+            sliderCell("Highlights", \.highlights, 0...1, scale: 100, decimals: 0,
+                       tip: "How much the relight brightens the lit areas as well as tinting them. 0 keeps your brightness; 100 adds strong highlights."),
+        ])
+        let colorStack = NSStackView(views: [temperatureRow, relightRow])
+        colorStack.orientation = .vertical
+        colorStack.alignment = .leading
+        colorStack.spacing = 8
+        for v in colorStack.arrangedSubviews { v.widthAnchor.constraint(equalTo: colorStack.widthAnchor).isActive = true }
+        colorBody = colorStack
+        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [colorStack], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
         chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
@@ -781,6 +840,9 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         offsetPad.value = params.shadowOffset
         shadowSwitch.state = params.shadowEnabled > 0.5 ? .on : .off
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
+        colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
+        fgMaskSwitch.state = params.fgMasked > 0.5 ? .on : .off
+        fgBlendPopup.selectItem(at: min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1))
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -909,6 +971,12 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
+    @objc private func fgMaskToggled() { onParam?(\.fgMasked, fgMaskSwitch.state == .on ? 1 : 0) }
+    @objc private func fgBlendModeChanged() { onParam?(\.fgBlend, Float(fgBlendPopup.indexOfSelectedItem)) }
+    @objc private func colorToggled() {
+        refreshEnabledStates()
+        onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)
+    }
 
     /// Dim and disable what a switched-off feature makes moot: with the key off,
     /// its controls and the whole Shadow group; with the shadow off, its body.
@@ -930,6 +998,24 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         if keyOn { set(shadowBody, shadowOn) }
         set(overlayRow, trackSwitch.state == .on)
         set(highRateRow, trackSwitch.state == .on)
+        // Colour: everything off with the switch; with auto on, only the slider is dimmed since auto drives it.
+        let colorOn = colorSwitch.state == .on
+        set(colorBody, colorOn)
+        if colorOn { set(temperatureCell, temperatureAutoSwitch.state == .off) }
+        temperatureAutoSwitch.isEnabled = colorOn
+    }
+
+    var temperatureAuto: Bool {
+        get { temperatureAutoSwitch.state == .on }
+        set { temperatureAutoSwitch.state = newValue ? .on : .off; refreshEnabledStates() }
+    }
+    @objc private func temperatureAutoChanged() { refreshEnabledStates(); onTemperatureAuto?(temperatureAutoSwitch.state == .on) }
+
+    /// Show the automatic temperature in the slider without treating it as a user change.
+    func showTemperature(_ value: Float) {
+        guard let (slider, cell, _, scale, decimals) = cells[\.temperature] else { return }
+        slider.floatValue = value
+        cell.value.stringValue = Self.format(value, scale: scale, decimals: decimals)
     }
 
     var faceHighRate: Bool {
