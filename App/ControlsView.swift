@@ -307,10 +307,7 @@ final class ControlsView: NSView {
     private let offsetPad = OffsetPad()
     /// `scale` and `decimals` turn the stored value into what the field shows (percent, pixels).
     private var cells: [WritableKeyPath<KeyParams, Float>: (slider: NSSlider, cell: ControlCell, range: ClosedRange<Float>, scale: Float, decimals: Int)] = [:]
-    private let keyLow = ValueField(frame: .zero)
-    private let keyHigh = ValueField(frame: .zero)
-    private var keyFieldWidths: [NSLayoutConstraint] = []
-    private var keyRangeCell: ControlCell!
+    private static let keyRangeTip = "Color Range: how close a colour must be to the key colour to be removed, in percent of the full chroma span. The left thumb is fully removed; the right thumb is where the transition to opaque ends. Typical keys sit between 5 and 20."
     private let sinkStatus = NSTextField(labelWithString: "Not connected")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let installButton = NSButton(title: "Install", target: nil, action: nil)
@@ -427,16 +424,18 @@ final class ControlsView: NSView {
         keySwatch.target = self
         keySwatch.action = #selector(pickKeyTapped)
         keySwatch.toolTip = "The backdrop colour being removed. Click to show the unkeyed image, then click the backdrop in the preview. Esc cancels."
-        autoButton.title = ""
-        autoButton.image = NSImage(systemSymbolName: "wand.and.sparkles", accessibilityDescription: "Auto")
-        autoButton.imagePosition = .imageOnly
+        // Auto: a small text button the size of the switch above it.
+        autoButton.title = "Auto"
         autoButton.isBordered = false
-        autoButton.symbolConfiguration = .init(pointSize: 14, weight: .regular)
-        autoButton.contentTintColor = .secondaryLabelColor
+        autoButton.wantsLayer = true
+        autoButton.layer?.cornerRadius = RangeSlider.trackHeight / 2
+        autoButton.font = .systemFont(ofSize: 10, weight: .medium)
+        autoButton.contentTintColor = .labelColor
         autoButton.target = self; autoButton.action = #selector(autoKeyTapped)
         autoButton.setContentHuggingPriority(.required, for: .horizontal)
-        autoButton.setAccessibilityLabel("Auto")
+        autoButton.widthAnchor.constraint(equalToConstant: 36).isActive = true   // the switch's visible size
         autoButton.heightAnchor.constraint(equalToConstant: RangeSlider.trackHeight).isActive = true
+        updateAutoButtonFill()
         autoButton.toolTip = "Find the backdrop colour and range from the edges of the frame over about a second, avoiding the face and body. Runs by itself when a new source is chosen."
         keySwitch.target = self; keySwitch.action = #selector(keyToggled)
         keySwitch.controlSize = .mini
@@ -449,7 +448,9 @@ final class ControlsView: NSView {
         keyRange.onChange = { [weak self] lo, hi in
             self?.onParam?(\.tolerance, lo); self?.onParam?(\.softness, hi - lo); self?.updateCompositeValues()
         }
-        keyRangeCell = rangeCell("Color Range", keyRange, tip: "How close a colour must be to the key colour to be removed, in percent of the full chroma span. Left value: fully removed. Right value: where the transition to opaque ends. Typical keys sit between 5 and 20; type or arrow past 30 if needed.")
+        keyRange.setAccessibilityElement(true)
+        keyRange.setAccessibilityRole(.slider)
+        keyRange.setAccessibilityLabel("Color Range")
         // Chromakey: the title is a pull-down for the matte, the swatch sits at
         // its left, Auto sits beside the Color Range.
         matteMenu.pullsDown = true
@@ -468,9 +469,10 @@ final class ControlsView: NSView {
         matteMenu.lastItem?.toolTip = "Use the Mac's own Background effect with a plain green image, then key that green: the best edges without a backdrop, on cameras that support it."
         matteMenu.toolTip = "Chromakey removes a real backdrop by colour. Background Removal finds you with on-device segmentation and needs no backdrop. Apple Chromakey sets up the Mac's Background effect with a green image to key."
         matteMenu.setContentHuggingPriority(.required, for: .horizontal)
-        let keyRangeRow = NSStackView(views: [keySwatch, keyRangeCell, autoButton])
+        let keyRangeRow = NSStackView(views: [keySwatch, keyRange, autoButton])
         keyRangeRow.spacing = 8
-        keyRangeRow.alignment = .bottom   // swatch and icon sit level with the track, not the title
+        keyRangeRow.alignment = .centerY
+        keyRange.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         self.keyRangeRow = keyRangeRow
         let body = NSStackView(views: [
             keyRangeRow,
@@ -745,39 +747,6 @@ final class ControlsView: NSView {
         String(format: "%.\(decimals)f", v * scale)
     }
 
-    /// Two fields, low and high, in percent of the chroma span (stored value × 100).
-    /// Typed or stepped values may go past the slider's track.
-    private func rangeCell(_ title: String, _ slider: RangeSlider, tip: String) -> ControlCell {
-        let dash = NSTextField(labelWithString: "–")
-        dash.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        dash.textColor = .secondaryLabelColor
-        for field in [keyLow, keyHigh] {   // sized to their text; see updateCompositeValues
-            let w = field.widthAnchor.constraint(equalToConstant: 14)
-            w.isActive = true
-            keyFieldWidths.append(w)
-            field.toolTip = tip
-        }
-        keyHigh.alignment = .left   // hugs the dash from the right as the low field does from the left
-        let cell = ControlCell(title: title, control: slider, valueViews: [keyLow, dash, keyHigh])
-        cell.toolTip = tip; cell.label.toolTip = tip; slider.toolTip = tip
-        func apply(lo: Float, hi: Float) {
-            let lo = max(lo, 0), hi = max(hi, lo + slider.minGap)
-            slider.lower = lo; slider.upper = hi
-            slider.onChange?(lo, hi)
-        }
-        keyLow.onCommit = { [weak self] text in
-            if let v = Float(text.trimmingCharacters(in: .whitespaces)) { apply(lo: v / 100, hi: max(slider.upper, v / 100 + slider.minGap)) }
-            self?.updateCompositeValues()
-        }
-        keyHigh.onCommit = { [weak self] text in
-            if let v = Float(text.trimmingCharacters(in: .whitespaces)) { apply(lo: min(slider.lower, v / 100 - slider.minGap), hi: v / 100) }
-            self?.updateCompositeValues()
-        }
-        keyLow.onStep = { d in apply(lo: slider.lower + d / 100, hi: max(slider.upper, slider.lower + d / 100 + slider.minGap)) }
-        keyHigh.onStep = { d in apply(lo: min(slider.lower, slider.upper + d / 100 - slider.minGap), hi: slider.upper + d / 100) }
-        return cell
-    }
-
     private func set(_ keyPath: WritableKeyPath<KeyParams, Float>, _ v: Float) {
         guard let (slider, cell, _, scale, decimals) = cells[keyPath] else { return }
         slider.floatValue = v
@@ -786,11 +755,10 @@ final class ControlsView: NSView {
     }
 
     private func updateCompositeValues() {
-        keyLow.stringValue = String(format: "%.0f", keyRange.lower * 100)
-        keyHigh.stringValue = String(format: "%.0f", keyRange.upper * 100)
-        for (field, width) in zip([keyLow, keyHigh], keyFieldWidths) {   // editable fields have no intrinsic width
-            width.constant = ceil((field.stringValue as NSString).size(withAttributes: [.font: field.font!]).width) + 6
-        }
+        // No readout above the track any more; the values live in its tooltip.
+        let range = String(format: "%.0f – %.0f", keyRange.lower * 100, keyRange.upper * 100)
+        keyRange.toolTip = "\(range)\n\n" + Self.keyRangeTip
+        keyRange.setAccessibilityValue(range)
         offsetValue.stringValue = String(format: "%+.0f, %+.0f", offsetPad.value.x * 100, offsetPad.value.y * 100)
     }
 
@@ -1194,8 +1162,20 @@ final class ControlsView: NSView {
     var autoRunning: Bool = false {
         didSet {
             autoButton.isEnabled = !autoRunning
-            autoButton.contentTintColor = autoRunning ? .controlAccentColor : .secondaryLabelColor
+            updateAutoButtonFill()
         }
+    }
+
+    /// Capsule fill for Auto: a quiet grey, accent while it runs; re-resolved for light and dark.
+    private func updateAutoButtonFill() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            autoButton.layer?.backgroundColor = (autoRunning ? NSColor.controlAccentColor.withAlphaComponent(0.35) : NSColor.quaternaryLabelColor).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAutoButtonFill()
     }
 
     /// A line under the Chromakey controls, cleared after `seconds` (nil keeps it).
