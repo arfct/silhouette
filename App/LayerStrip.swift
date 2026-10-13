@@ -1,30 +1,36 @@
 import AppKit
 
-/// A round or capsule button drawn over a tile's picture: white glyph on a
-/// dark translucent backing, accent backing while a toggle is on.
+/// A circular button over a tile's picture: Liquid Glass on macOS 26, a dark
+/// translucent circle before that. Toggles tint with the accent colour while on.
 final class OverlayButton: NSButton {
-    static let size: CGFloat = 24
+    static let size: CGFloat = 28
     /// Toggles show their state; plain buttons leave it off.
     var isOn = false { didSet { updateLook() } }
+    private let glass: Bool
 
     init(symbol: String? = nil, text: String? = nil, tip: String) {
+        if #available(macOS 26.0, *) { glass = true } else { glass = false }
         super.init(frame: .zero)
-        isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = Self.size / 2
         title = text ?? ""
         if let symbol {
             image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
-            symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+            symbolConfiguration = .init(pointSize: 12, weight: .semibold)
             imagePosition = .imageOnly
         }
         font = .systemFont(ofSize: 10, weight: .bold)
+        if #available(macOS 26.0, *) {
+            bezelStyle = .glass
+            borderShape = .circle
+        } else {
+            isBordered = false
+            wantsLayer = true
+            layer?.cornerRadius = Self.size / 2
+        }
         toolTip = tip
         setAccessibilityLabel(text ?? tip)
         translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: Self.size).isActive = true
         heightAnchor.constraint(equalToConstant: Self.size).isActive = true
-        widthAnchor.constraint(greaterThanOrEqualToConstant: Self.size).isActive = true
-        if text != nil { widthAnchor.constraint(equalToConstant: 30).isActive = true }
         updateLook()
     }
 
@@ -35,28 +41,39 @@ final class OverlayButton: NSButton {
     }
 
     private func updateLook() {
-        layer?.backgroundColor = (isOn ? NSColor.controlAccentColor : NSColor.black.withAlphaComponent(0.5)).cgColor
-        contentTintColor = .white
-        attributedTitle = NSAttributedString(string: title, attributes: [.font: font ?? .systemFont(ofSize: 10), .foregroundColor: NSColor.white])
+        if glass {
+            bezelColor = isOn ? .controlAccentColor : nil
+            // Glass ignores the content tint for glyphs, so colour them directly: white on the accent.
+            let base = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            symbolConfiguration = isOn ? base.applying(.init(paletteColors: [.white])) : base
+            let font = self.font ?? .systemFont(ofSize: 10, weight: .bold)
+            attributedTitle = NSAttributedString(string: title, attributes: [.font: font, .foregroundColor: isOn ? NSColor.white : NSColor.labelColor])
+        } else {
+            layer?.backgroundColor = (isOn ? NSColor.controlAccentColor : NSColor.black.withAlphaComponent(0.5)).cgColor
+            contentTintColor = .white
+            attributedTitle = NSAttributedString(string: title, attributes: [.font: font ?? .systemFont(ofSize: 10), .foregroundColor: NSColor.white])
+        }
         setAccessibilityValue(isOn ? "on" : "off")
     }
 }
 
 /// One of the Source, Background, and Foreground tiles above the preview: the
-/// current picture at 16:9, its name, a picker button at the top right, and
-/// the layer's own option buttons at the bottom right.
+/// current picture at 16:9 with the layer's option buttons at its bottom
+/// right. A click on the picture opens the picker. The caption, the layer's
+/// name and the current choice, sits above the tile in the title bar.
 final class LayerTile: NSView {
-    let pickerButton = OverlayButton(symbol: "square.grid.2x2", tip: "Choose…")
     var onPick: (() -> Void)?
+    /// "SOURCE  Sample video", for the window to place above the tile.
+    let caption = NSTextField(labelWithString: "")
+    /// The tile and its caption stacked, as one column of the strip.
+    private(set) var column: NSStackView!
 
+    private let title: String
     private let thumb = ThumbnailView(frame: .zero)
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let nameLabel = NSTextField(labelWithString: "")
     private let options = NSStackView()
-    private let topScrim = CAGradientLayer()
-    private let bottomScrim = CAGradientLayer()
 
     init(title: String, options optionButtons: [NSView]) {
+        self.title = title
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -69,34 +86,15 @@ final class LayerTile: NSView {
         thumb.symbolPointSize = 26
         addSubview(thumb)
 
-        for scrim in [topScrim, bottomScrim] {
-            scrim.colors = [NSColor.black.withAlphaComponent(0.45).cgColor, NSColor.black.withAlphaComponent(0).cgColor]
-            layer?.addSublayer(scrim)
-        }
-        bottomScrim.startPoint = CGPoint(x: 0.5, y: 0); bottomScrim.endPoint = CGPoint(x: 0.5, y: 1)
-        topScrim.startPoint = CGPoint(x: 0.5, y: 1); topScrim.endPoint = CGPoint(x: 0.5, y: 0)
-
-        titleLabel.stringValue = title.uppercased()
-        titleLabel.font = .systemFont(ofSize: 10, weight: .bold)
-        titleLabel.textColor = .white
-        nameLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        nameLabel.textColor = .white
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for label in [titleLabel, nameLabel] {
-            label.translatesAutoresizingMaskIntoConstraints = false
-            let shadow = NSShadow(); shadow.shadowColor = .black.withAlphaComponent(0.6); shadow.shadowBlurRadius = 2; shadow.shadowOffset = .zero
-            label.shadow = shadow
-            addSubview(label)
-        }
-
-        pickerButton.target = self
-        pickerButton.action = #selector(pickTapped)
-        pickerButton.toolTip = "Choose the \(title.lowercased())"
-        addSubview(pickerButton)
+        caption.lineBreakMode = .byTruncatingTail
+        caption.maximumNumberOfLines = 1
+        caption.cell?.truncatesLastVisibleLine = true
+        caption.cell?.usesSingleLineMode = true
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        caption.toolTip = "Click the picture to choose the \(title.lowercased())."
 
         options.translatesAutoresizingMaskIntoConstraints = false
-        options.spacing = 5
+        options.spacing = 6
         optionButtons.forEach(options.addArrangedSubview)
         addSubview(options)
 
@@ -107,30 +105,27 @@ final class LayerTile: NSView {
             thumb.trailingAnchor.constraint(equalTo: trailingAnchor),
             thumb.topAnchor.constraint(equalTo: topAnchor),
             thumb.bottomAnchor.constraint(equalTo: bottomAnchor),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad + 2),
-            titleLabel.centerYAnchor.constraint(equalTo: pickerButton.centerYAnchor),
-            pickerButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
-            pickerButton.topAnchor.constraint(equalTo: topAnchor, constant: pad),
             options.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
             options.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
-            nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad + 2),
-            nameLabel.centerYAnchor.constraint(equalTo: options.centerYAnchor),
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: options.leadingAnchor, constant: -6),
         ])
-        options.heightAnchor.constraint(equalToConstant: OverlayButton.size).isActive = true
-        setAccessibilityElement(false)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Choose the \(title.lowercased())")
+
+        let column = NSStackView(views: [caption, self])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 10
+        // A long file name truncates rather than widening the column (and the window).
+        column.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        column.setHuggingPriority(.defaultLow, for: .horizontal)
+        widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        caption.widthAnchor.constraint(lessThanOrEqualTo: column.widthAnchor).isActive = true
+        self.column = column
+        show(PickerItem(value: "", title: "", thumbnail: .symbol("nosign")))
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        let h = min(bounds.height * 0.42, 44)
-        bottomScrim.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
-        topScrim.frame = CGRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
-        CATransaction.commit()
-    }
 
     override func updateLayer() {
         super.updateLayer()
@@ -138,18 +133,29 @@ final class LayerTile: NSView {
     }
     override var wantsUpdateLayer: Bool { true }
 
-    /// The current choice: its name and thumbnail.
+    /// The current choice: its name in the caption, its picture in the tile.
     func show(_ item: PickerItem) {
-        nameLabel.stringValue = item.title
-        nameLabel.toolTip = item.tooltip ?? item.title
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail   // one line; a long name ends in an ellipsis
+        let text = NSMutableAttributedString(string: title.uppercased(), attributes: [
+            .paragraphStyle: style,
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+        if !item.title.isEmpty {
+            text.append(NSAttributedString(string: "   " + item.title, attributes: [
+                .paragraphStyle: style,
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]))
+        }
+        caption.attributedStringValue = text
+        caption.toolTip = item.tooltip ?? item.title
+        setAccessibilityValue(item.title)
         thumb.show(item.thumbnail)
     }
 
     @objc private func pickTapped() { onPick?() }
 
-    /// A click on the picture opens the picker too.
     override func mouseDown(with event: NSEvent) {}
     override func mouseUp(with event: NSEvent) {
         if bounds.contains(convert(event.locationInWindow, from: nil)) { onPick?() }
     }
+    override func accessibilityPerformPress() -> Bool { onPick?(); return true }
 }

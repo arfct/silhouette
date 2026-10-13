@@ -382,9 +382,11 @@ final class ControlsView: NSView {
         sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
         backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
         foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
-        for tile in [sourceTile!, backgroundTile!, foregroundTile!] { layerStrip.addArrangedSubview(tile) }
+        for tile in [sourceTile!, backgroundTile!, foregroundTile!] { layerStrip.addArrangedSubview(tile.column) }
         layerStrip.orientation = .horizontal
         layerStrip.distribution = .fillEqually
+        layerStrip.alignment = .top
+        layerStrip.setClippingResistancePriority(.defaultLow, for: .horizontal)
         layerStrip.spacing = 10
         layerStrip.translatesAutoresizingMaskIntoConstraints = false
         picker.onSelect = { [weak self] value in self?.pickerChose(value) }
@@ -918,14 +920,14 @@ final class ControlsView: NSView {
 
     func showSourcePicker() {
         pickerTarget = .source
-        picker.show(title: "Source", sections: sourceSections(), selected: sourceSelection, from: sourceTile.pickerButton, edge: .minY)
+        picker.show(title: "Source", sections: sourceSections(), selected: sourceSelection, from: sourceTile, edge: .minY)
     }
 
     /// Open a layer's picker; `entry` opens the web or colour field at once.
     func showLayerPicker(_ slot: LayerSlot, entry: PickerAddKind? = nil) {
         pickerTarget = .layer(slot)
         picker.show(title: slot == .foreground ? "Foreground" : "Background", sections: layerSections(slot),
-                    selected: layerValues[slot], from: (slot == .foreground ? foregroundTile : backgroundTile).pickerButton, edge: .minY, openEntry: entry)
+                    selected: layerValues[slot], from: (slot == .foreground ? foregroundTile : backgroundTile)!, edge: .minY, openEntry: entry)
     }
 
     private func pickerChose(_ value: String) {

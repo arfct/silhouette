@@ -1045,12 +1045,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentHost.addSubview(foreground.webView)
         contentHost.addSubview(previewBox)
         contentHost.addSubview(controls.layerStrip)
-        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        statsLabel.textColor = .tertiaryLabelColor
+        // Frame rate and GPU time: a small badge on the preview's top-right corner
+        // (preview only; the output never has it), clear of the tile captions.
+        statsLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        statsLabel.textColor = .white
         statsLabel.alignment = .right
         statsLabel.toolTip = "Frames per second and GPU time per frame for the keying pipeline."
         statsLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentHost.addSubview(statsLabel)
+        let statsBadge = NSView()
+        statsBadge.wantsLayer = true
+        statsBadge.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        statsBadge.layer?.cornerRadius = 9
+        statsBadge.translatesAutoresizingMaskIntoConstraints = false
+        statsBadge.addSubview(statsLabel)
+        previewContent.addSubview(statsBadge)
         // 16:9 like the output, as large as the insets allow, pinned to the top.
         let aspect = CGFloat(VirtualCameraConstants.width) / CGFloat(VirtualCameraConstants.height)
         // The sidebar already pads its right edge by 12, so the box starts at the
@@ -1067,11 +1075,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             area.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -12),
             area.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 44),
             area.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor, constant: -14),
-            statsLabel.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -16),
-            statsLabel.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 14),
+            statsLabel.leadingAnchor.constraint(equalTo: statsBadge.leadingAnchor, constant: 8),
+            statsLabel.trailingAnchor.constraint(equalTo: statsBadge.trailingAnchor, constant: -8),
+            statsLabel.centerYAnchor.constraint(equalTo: statsBadge.centerYAnchor),
+            statsBadge.heightAnchor.constraint(equalToConstant: 18),
+            statsBadge.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -8),
+            statsBadge.topAnchor.constraint(equalTo: previewContent.topAnchor, constant: 8),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
             // Source, Background, Foreground above the preview, each a third of its width.
-            controls.layerStrip.topAnchor.constraint(equalTo: area.topAnchor),
+            // Captions in the title bar, level with the stats; tiles start where the preview used to.
+            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 12),
             controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
             controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
             previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),
