@@ -57,7 +57,7 @@ final class OverlayButton: NSButton {
     }
 }
 
-/// One of the Source, Background, and Foreground tiles above the preview: the
+/// One of the Background, Source, and Foreground tiles above the preview: the
 /// current picture at 16:9 with the layer's option buttons at its bottom
 /// right. A click on the picture opens the picker. The caption, the layer's
 /// name and the current choice, sits above the tile in the title bar.

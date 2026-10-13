@@ -1009,6 +1009,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "Silhouette"
+        // Always dark: a video tool, where a light frame around the picture distracts.
+        window.appearance = NSAppearance(named: .darkAqua)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
@@ -1090,7 +1092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controls.previewButtons.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -10),
             controls.previewButtons.bottomAnchor.constraint(equalTo: previewContent.bottomAnchor, constant: -10),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
-            // Source, Background, Foreground above the preview, each a third of its width.
+            // Background, Source, Foreground above the preview, each a third of its width.
             // Captions in the title bar, level with the stats; tiles start where the preview used to.
             controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 12),
             controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),

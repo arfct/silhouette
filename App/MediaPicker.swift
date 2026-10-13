@@ -274,6 +274,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
         popover.contentViewController = vc
         popover.behavior = .transient
         popover.animates = true
+        popover.appearance = view.window?.appearance   // dark like the window it belongs to
         popover.delegate = self
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: edge)
         if let openEntry { vc.openEntry(openEntry) }

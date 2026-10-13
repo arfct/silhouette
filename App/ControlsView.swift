@@ -253,7 +253,7 @@ final class ControlsView: NSView {
     private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
     private let fgBlendButton = OverlayButton(symbol: "camera.filters", tip: "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top.")
     private var fgBlendValue = 0
-    /// Source, Background, and Foreground, shown above the preview rather than in the sidebar.
+    /// Background, Source, and Foreground, shown above the preview rather than in the sidebar.
     private(set) var sourceTile: LayerTile!
     private(set) var backgroundTile: LayerTile!
     private(set) var foregroundTile: LayerTile!
@@ -380,7 +380,7 @@ final class ControlsView: NSView {
 
         trackSwitch.target = self; trackSwitch.action = #selector(trackChanged)
 
-        // Source, Background, Foreground: tiles above the preview. Each has a
+        // Background, Source, Foreground: tiles above the preview. Each has a
         // picker button at its top right and its options at the bottom right.
         supersampleButton.target = self; supersampleButton.action = #selector(supersampleChanged)
         mirrorButton.target = self; mirrorButton.action = #selector(mirrorChanged)
@@ -398,7 +398,7 @@ final class ControlsView: NSView {
         sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
         backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
         foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
-        for tile in [sourceTile!, backgroundTile!, foregroundTile!] {
+        for tile in [backgroundTile!, sourceTile!, foregroundTile!] {   // back to front, as they stack in the output
             layerStrip.addArrangedSubview(tile.column)
             // Exactly a third of the row, so nothing (a long caption, the fill-height rule) can widen a tile.
             tile.column.widthAnchor.constraint(equalTo: layerStrip.widthAnchor, multiplier: 1.0 / 3.0, constant: -20.0 / 3.0).isActive = true
@@ -1130,8 +1130,12 @@ final class ControlsView: NSView {
             matteSourceValue = newValue == 1 ? 1 : 0   // Apple Chromakey keys like Chromakey
             let person = matteSourceValue == 1
             let title = person ? "Background Removal" : "Chromakey"
+            var titleColor = NSColor.labelColor.withAlphaComponent(0.72)
+            effectiveAppearance.performAsCurrentDrawingAppearance {   // resolve now; the title keeps the resolved colour
+                titleColor = NSColor(cgColor: NSColor.labelColor.withAlphaComponent(0.72).cgColor) ?? titleColor
+            }
             matteMenu.item(at: 0)?.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.labelColor.withAlphaComponent(0.72)])   // the pull-down dims its title; this lands on the other headers' grey
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: titleColor])   // the pull-down dims its title; this lands on the other headers' grey
             for item in matteMenu.itemArray where item.action == #selector(matteChosen(_:)) {
                 item.state = item.tag == matteSourceValue ? .on : .off
             }
@@ -1173,6 +1177,8 @@ final class ControlsView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateAutoButtonFill()
+        // The pull-down's attributed title holds a resolved colour; redraw it for this appearance.
+        effectiveAppearance.performAsCurrentDrawingAppearance { matteSource = matteSourceValue }
     }
 
     /// A line under the Chromakey controls, cleared after `seconds` (nil keeps it).
