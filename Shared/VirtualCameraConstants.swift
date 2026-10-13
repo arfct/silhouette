@@ -17,4 +17,10 @@ enum VirtualCameraConstants {
     static let width = 1920
     static let height = 1080
     static let frameRate: Int32 = 30
+
+    /// Custom property on the sink stream, as a four-character code: "1" while
+    /// any app is streaming the virtual camera, "0" otherwise. The app's own
+    /// sink connection keeps the device running, so the standard
+    /// running-somewhere property cannot tell the two apart.
+    static let inUseSelector = "slin"
 }

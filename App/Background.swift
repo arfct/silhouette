@@ -21,6 +21,16 @@ final class BackgroundController: NSObject {
     private let loader: MTKTextureLoader
     private let textureQueue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).background", qos: .utility)
     private var snapshotTimer: Timer?
+    /// The most recent web page snapshot, for the picker's thumbnail.
+    private(set) var lastSnapshot: CGImage?
+    /// Paused: no snapshots and no movie decoding; the layer keeps its last frame.
+    var paused = false {
+        didSet {
+            guard paused != oldValue else { return }
+            if paused { stopSnapshots(); videoSource?.stop() }
+            else { if mode == .web { startSnapshots() }; videoSource?.start() }
+        }
+    }
     private var snapshotInFlight = false
     private var snapshotWidth = CGFloat(VirtualCameraConstants.width)
     static let snapshotsPerSecond: TimeInterval = 15
@@ -172,7 +182,7 @@ final class BackgroundController: NSObject {
             setTexture(tex)
         }
         videoSource = source
-        source.start()
+        if !paused { source.start() }
     }
 
     func setImage(url: URL) {
@@ -233,7 +243,7 @@ final class BackgroundController: NSObject {
     /// One-shot timer so the rate can adapt: fast while the page changes,
     /// slow once several snapshots in a row are identical.
     private func startSnapshots() {
-        guard snapshotTimer == nil else { return }
+        guard snapshotTimer == nil, !paused else { return }
         unchangedCount = 0
         scheduleSnapshot()
     }
@@ -244,7 +254,7 @@ final class BackgroundController: NSObject {
             guard let self else { return }
             snapshotTimer = nil
             snapshot()
-            if mode == .web { scheduleSnapshot() }
+            if mode == .web && !paused { scheduleSnapshot() }
         }
     }
 
@@ -274,6 +284,7 @@ final class BackgroundController: NSObject {
     /// Copy the snapshot into a texture without Core Graphics redrawing it.
     /// Skips the upload entirely when the sampled pixels match the last frame.
     private func upload(_ cg: CGImage) {
+        lastSnapshot = cg
         guard cg.bitsPerPixel == 32, cg.bitsPerComponent == 8,
               let data = cg.dataProvider?.data, let base = CFDataGetBytePtr(data) else {
             if let tex = try? loader.newTexture(cgImage: cg, options: textureOptions) { setTexture(tex) }

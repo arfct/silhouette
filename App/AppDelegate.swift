@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreImage
 import UniformTypeIdentifiers
 import WebKit
 import os.log
@@ -180,8 +181,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var failedStartsSinceReplace = 0
 
+    /// Menu bar item, so Silhouette keeps running with its window closed.
+    private var statusItem: NSStatusItem!
+    private let statusMenu = NSMenu()
+    /// The window is open (not closed; it may still be covered or minimised).
+    private var windowOpen = true
+    /// Read on the render thread to skip handing frames to a closed window.
+    private let windowOpenLock = NSLock()
+    private var windowOpenForFrames = true
+    /// The freeze-frame timer skips rendering while idle.
+    private var idleForFrames = false
+    /// An app is streaming the virtual camera, as the extension reports it.
+    /// Unknown counts as in use, so an older extension never idles the app.
+    private var cameraInUse = true
+    /// Window closed and nobody watching: capture, decoding, and snapshots stop.
+    private var idle = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        buildStatusItem()
         buildControls()
         buildWindow()
 
@@ -210,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             faceTracker.process(small, camScale: m.scale, camOffset: m.offset)
         }
         renderer.onStats = { [weak self] fps, gpuMs, maskMs in
+            guard self?.windowOpen == true else { return }
             self?.statsLabel.stringValue = maskMs > 0
                 ? String(format: "%.0f fps · GPU %.2f ms · mask %.1f ms", fps, gpuMs, maskMs)
                 : String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
@@ -269,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         faceTracker.onUpdate = { [weak self] state in
             guard let self else { return }
-            preview.showFace(state)
+            if windowOpen { preview.showFace(state) }
             renderer.setFace(state)
             background.send(face: state)
             foreground.send(face: state)
@@ -303,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pollSink()
         }
         installer.activate()
-        connectTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollSink() }
+        connectTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pollSink() }
         pollSink()
 
         NotificationCenter.default.addObserver(self, selector: #selector(devicesChanged),
@@ -316,7 +335,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window keeps the virtual camera running from the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        setWindowOpen(false)
+        // No Dock icon while only the menu bar item is showing.
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    @objc private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        setWindowOpen(true)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func setWindowOpen(_ open: Bool) {
+        windowOpen = open
+        windowOpenLock.lock(); windowOpenForFrames = open; windowOpenLock.unlock()
+        if !open { controls.closePicker() }
+        updateIdle()
+        updateStatusItem()
+    }
+
+    /// Idle when the window is closed and no app is watching the virtual
+    /// camera: the camera stops capturing and layers stop decoding and
+    /// snapshotting. The extension shows its placeholder until frames return,
+    /// which takes about a second after an app opens the camera.
+    private func updateIdle() {
+        let shouldIdle = !windowOpen && !cameraInUse
+        guard shouldIdle != idle else { return }
+        idle = shouldIdle
+        windowOpenLock.lock(); idleForFrames = shouldIdle; windowOpenLock.unlock()
+        if idle {
+            camera.pause()
+            background.paused = true
+            foreground.paused = true
+        } else {
+            camera.resume()
+            background.paused = false
+            foreground.paused = false
+        }
+        Logger(subsystem: VirtualCameraConstants.appBundleID, category: "power").info("idle \(self.idle)")
+    }
+
+    // MARK: Menu bar item
+
+    private func buildStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusMenu.delegate = self
+        statusItem.menu = statusMenu
+        updateStatusItem()
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        let name = cameraInUse ? "person.crop.rectangle.fill" : "person.crop.rectangle"
+        button.image = NSImage(systemSymbolName: name, accessibilityDescription: "Silhouette")
+        button.toolTip = cameraInUse ? "Silhouette: the virtual camera is in use" : "Silhouette"
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         sink.disconnect()
@@ -329,6 +413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleOutput(_ buffer: CVPixelBuffer) {
         sink.send(buffer)
+        windowOpenLock.lock(); let showing = windowOpenForFrames; windowOpenLock.unlock()
+        guard showing else { return }   // window closed: the frame only goes to the virtual camera
         let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
         DispatchQueue.main.async { [self] in
             // Nothing to show while the window is hidden, minimised, or covered.
@@ -341,6 +427,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func pollSink() {
         if !sink.isConnected { sink.connect() }
         controls.sinkConnected = sink.isConnected
+        let inUse = sink.isInUse ?? true
+        if inUse != cameraInUse {
+            cameraInUse = inUse
+            updateIdle()
+            updateStatusItem()
+        }
         if extensionReplaced && !sink.isConnected && sink.startFailed {
             failedStartsSinceReplace += 1
             if failedStartsSinceReplace >= 3 { relaunch() }
@@ -378,7 +470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let bookmark = settings.videoBookmark { settings.fileBookmarks[url.path] = bookmark }
         settings.recentVideos.removeAll { $0 == url.path }
         settings.recentVideos.insert(url.path, at: 0)
-        settings.recentVideos = Array(settings.recentVideos.prefix(10))
+        settings.recentVideos = Array(settings.recentVideos.prefix(12))
         pruneBookmarks()
         settings.save()
         devicesChanged()
@@ -552,7 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func addRecent(_ entry: String) {
         settings.recentWebURLs.removeAll { $0 == entry }
         settings.recentWebURLs.insert(entry, at: 0)
-        settings.recentWebURLs = Array(settings.recentWebURLs.prefix(10))
+        settings.recentWebURLs = Array(settings.recentWebURLs.prefix(24))
         pruneBookmarks()
         controls.setRecents(settings.recentWebURLs)
     }
@@ -596,8 +688,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func setWebPage() {
+        if !windowOpen { showMainWindow() }
         if sidebarItem.isCollapsed { toggleSidebar() }
-        window.makeFirstResponder(controls.urlField)
+        controls.showLayerPicker(.background, entry: .web)
     }
 
     @objc private func clearBackground() { setLayerNone(.background) }
@@ -625,7 +718,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             frameLock.lock(); let frame = frozenFrame; frameLock.unlock()
-            if let frame { renderer.render(frame) }
+            windowOpenLock.lock(); let idle = idleForFrames; windowOpenLock.unlock()
+            if let frame, !idle { renderer.render(frame) }
         }
         freezeTimer = timer
         timer.resume()
@@ -1099,6 +1193,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let device = camera.currentDevice { camera.start(device: device) }   // re-pick the preset
         }
         controls.onLayerNone = { [weak self] slot in self?.setLayerNone(slot) }
+        ThumbnailLoader.shared.access = { [weak self] url in
+            self?.settings.fileBookmarks[url.path].flatMap { ScopedFile(bookmark: $0) }
+        }
+        controls.currentFrameImage = { [weak self] in
+            guard let self else { return nil }
+            frameLock.lock(); let frame = latestFrame; frameLock.unlock()
+            return frame.flatMap(Self.thumbnail(of:))
+        }
+        controls.layerSnapshot = { [weak self] slot in
+            guard let self, layer(slot).mode == .web, let cg = layer(slot).lastSnapshot else { return nil }
+            return NSImage(cgImage: cg, size: .zero)
+        }
+        controls.onRemoveRecent = { [weak self] value in
+            guard let self else { return }
+            settings.recentWebURLs.removeAll { $0 == value }
+            pruneBookmarks()
+            settings.save()
+            controls.setRecents(settings.recentWebURLs)
+        }
+        controls.onRemoveVideo = { [weak self] path in
+            guard let self else { return }
+            settings.recentVideos.removeAll { $0 == path }
+            pruneBookmarks()
+            settings.save()
+            devicesChanged()
+        }
         controls.onLayerChooseFile = { [weak self] slot in self?.openImage(for: slot) }
         controls.onLayerWeb = { [weak self] slot, text in self?.setLayerWeb(slot, text) }
         controls.onLayerFile = { [weak self] slot, path in self?.setLayerFile(slot, path: path) }
@@ -1189,4 +1309,37 @@ extension AppDelegate: NSMenuItemValidation {
 private final class InvisibleDividerSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 0 }
     override func drawDivider(in rect: NSRect) {}
+}
+
+// MARK: - Menu bar menu
+
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        menu.removeAllItems()
+        let state = NSMenuItem(title: cameraInUse ? "Virtual camera in use" : "Virtual camera not in use", action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        menu.addItem(state)
+        if !windowOpen && !cameraInUse {
+            let idle = NSMenuItem(title: "Paused until an app uses the camera", action: nil, keyEquivalent: "")
+            idle.isEnabled = false
+            menu.addItem(idle)
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Open Silhouette", action: #selector(showMainWindow), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Silhouette", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+}
+
+extension AppDelegate {
+    /// A small picture of a camera frame, for the source picker.
+    static func thumbnail(of frame: CVPixelBuffer) -> NSImage? {
+        let image = CIImage(cvPixelBuffer: frame)
+        let scale = 320 / max(image.extent.width, 1)
+        let small = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cg = thumbnailContext.createCGImage(small, from: small.extent) else { return nil }
+        return NSImage(cgImage: cg, size: .zero)
+    }
+    private static let thumbnailContext = CIContext(options: [.cacheIntermediates: false])
 }

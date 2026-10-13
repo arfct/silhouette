@@ -43,13 +43,34 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 
+    /// While paused nothing is captured or decoded; the chosen source is kept
+    /// and resumes where it was. Starting a different source while paused
+    /// sets it up without running it.
+    private(set) var paused = false
+
+    func pause() {
+        guard !paused else { return }
+        paused = true
+        testPattern.stop()
+        video?.stop()
+        queue.async { [self] in if session.isRunning { session.stopRunning() } }
+    }
+
+    func resume() {
+        guard paused else { return }
+        paused = false
+        if usingTestPattern { testPattern.start() }
+        else if let video { video.start() }
+        else if currentDevice != nil || input != nil { queue.async { [self] in if !session.isRunning { session.startRunning() } } }
+    }
+
     func startTestPattern() {
         onSourceMirrored?(false)
         usingTestPattern = true
         currentDevice = nil
         stopVideo()
         queue.async { [self] in if session.isRunning { session.stopRunning() } }
-        testPattern.start()
+        if !paused { testPattern.start() }
     }
 
     func startVideo(url: URL) {
@@ -63,7 +84,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         v.onFrame = { [weak self] pb in self?.onFrame?(pb) }
         v.onMirrored = { [weak self] mirrored in self?.onSourceMirrored?(mirrored) }
         video = v
-        v.start()
+        if !paused { v.start() }
     }
 
     private func stopVideo() {
@@ -102,7 +123,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
             let format = output.availableVideoPixelFormatTypes.first { planar.contains($0) } ?? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
             output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: format]
             session.commitConfiguration()
-            if !session.isRunning { session.startRunning() }
+            if !session.isRunning && !paused { session.startRunning() }
         }
     }
 

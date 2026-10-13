@@ -33,4 +33,4 @@ Raise Desaturate.
 Yes, two ways. In the Chromakey section choose **Person**, which finds you with on-device segmentation and works with any camera. Or choose **Apple**, which turns the Mac's own Background effect into a virtual green screen: save the green image, turn on Background in Video Effects with that image as a custom background, and Silhouette keys it. Apple gives cleaner hair edges and needs the built-in camera or iPhone Continuity Camera on macOS 15 or later.
 
 **Can I try it without any camera?**
-Choose Sample video or Test pattern in the Source menu.
+Click the Source button and choose Sample video or Test pattern.

@@ -114,11 +114,15 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
 
     func setDeviceProperties(_ deviceProperties: CMIOExtensionDeviceProperties) throws {}
 
+    /// True while any client streams the virtual camera.
+    var isSourceStreaming: Bool { lock.lock(); defer { lock.unlock() }; return sourceStreamingCount > 0 }
+
     // MARK: Source stream lifecycle
 
     func sourceDidStart() {
         lock.lock(); defer { lock.unlock() }
         sourceStreamingCount += 1
+        if sourceStreamingCount == 1 { timerQueue.async { [weak self] in self?.sinkStream?.notifyInUse(true) } }   // outside the lock
         guard sourceStreamingCount == 1 else { return }
         let t = DispatchSource.makeTimerSource(queue: timerQueue)
         t.schedule(deadline: .now(), repeating: .milliseconds(Int(1000 / VirtualCameraConstants.frameRate)), leeway: .milliseconds(2))
@@ -132,6 +136,7 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
         lock.lock(); defer { lock.unlock() }
         sourceStreamingCount = max(0, sourceStreamingCount - 1)
         guard sourceStreamingCount == 0 else { return }
+        timerQueue.async { [weak self] in self?.sinkStream?.notifyInUse(false) }
         timer?.cancel()
         timer = nil
         log.info("source stream stopped")
@@ -261,10 +266,18 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
 
     var formats: [CMIOExtensionStreamFormat] { [format] }
 
+    /// "1" while any app streams the virtual camera; the Silhouette app idles otherwise.
+    static let inUseProperty = CMIOExtensionProperty(rawValue: "4cc_\(VirtualCameraConstants.inUseSelector)_glob_0000")
+
     var availableProperties: Set<CMIOExtensionProperty> {
         [.streamActiveFormatIndex, .streamFrameDuration,
          .streamSinkBufferQueueSize, .streamSinkBuffersRequiredForStartup,
-         .streamSinkBufferUnderrunCount, .streamSinkEndOfData]
+         .streamSinkBufferUnderrunCount, .streamSinkEndOfData, Self.inUseProperty]
+    }
+
+    func notifyInUse(_ inUse: Bool) {
+        let state = CMIOExtensionPropertyState<AnyObject>(value: (inUse ? "1" : "0") as NSString)
+        stream.notifyPropertiesChanged([Self.inUseProperty: state])
     }
 
     func streamProperties(forProperties properties: Set<CMIOExtensionProperty>) throws -> CMIOExtensionStreamProperties {
@@ -284,6 +297,9 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
         }
         if properties.contains(.streamSinkEndOfData) {
             p.setPropertyState(CMIOExtensionPropertyState(value: NSNumber(value: false)), forProperty: .streamSinkEndOfData)
+        }
+        if properties.contains(Self.inUseProperty) {
+            p.setPropertyState(CMIOExtensionPropertyState(value: (device.isSourceStreaming ? "1" : "0") as NSString), forProperty: Self.inUseProperty)
         }
         return p
     }
