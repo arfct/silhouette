@@ -1044,6 +1044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentHost.addSubview(background.webView)
         contentHost.addSubview(foreground.webView)
         contentHost.addSubview(previewBox)
+        contentHost.addSubview(controls.layerStrip)
         statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         statsLabel.textColor = .tertiaryLabelColor
         statsLabel.alignment = .right
@@ -1058,7 +1059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentHost.addLayoutGuide(area)
         previewLeading = area.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor, constant: settings.sidebarVisible ? 0 : 12)
         let fullWidth = previewBox.widthAnchor.constraint(equalTo: area.widthAnchor)
-        fullWidth.priority = .defaultHigh
+        // Below the window's own size, so a short window shrinks the preview
+        // (and the tiles above it) instead of growing past the screen.
+        fullWidth.priority = .dragThatCannotResizeWindow
         NSLayoutConstraint.activate([
             previewLeading,
             area.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -12),
@@ -1067,7 +1070,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statsLabel.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -16),
             statsLabel.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 14),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
-            previewBox.topAnchor.constraint(equalTo: area.topAnchor),
+            // Source, Background, Foreground above the preview, each a third of its width.
+            controls.layerStrip.topAnchor.constraint(equalTo: area.topAnchor),
+            controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
+            controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
+            previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),
             previewBox.leadingAnchor.constraint(equalTo: area.leadingAnchor),   // left-aligned when height-limited
             previewBox.bottomAnchor.constraint(lessThanOrEqualTo: area.bottomAnchor),
             fullWidth,

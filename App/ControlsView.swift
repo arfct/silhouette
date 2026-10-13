@@ -246,10 +246,19 @@ final class ControlsView: NSView {
     var onPickKey: (() -> Void)?
     var onAutoKey: (() -> Void)?
 
-    /// Sidebar buttons that open the picker popover for each choice.
-    let sourceButton = PickerButton()
-    let backgroundButton = PickerButton()
-    let foregroundButton = PickerButton()
+    /// Option buttons drawn over the tiles.
+    private let supersampleButton = OverlayButton(text: "4K", tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work.")
+    private let mirrorButton = OverlayButton(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right", tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored.")
+    private let freezeButton = OverlayButton(symbol: "pause.fill", tip: "Freeze frame")
+    private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
+    private let fgBlendButton = OverlayButton(symbol: "camera.filters", tip: "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top.")
+    private var fgBlendValue = 0
+    /// Source, Background, and Foreground, shown above the preview rather than in the sidebar.
+    private(set) var sourceTile: LayerTile!
+    private(set) var backgroundTile: LayerTile!
+    private(set) var foregroundTile: LayerTile!
+    /// The row of three tiles; the window places it above the preview.
+    let layerStrip = NSStackView()
     private let picker = PickerPopover()
     private enum PickerTarget { case source, layer(LayerSlot) }
     private var pickerTarget: PickerTarget?
@@ -263,14 +272,10 @@ final class ControlsView: NSView {
     /// Forget a layer recent (URL, path, or colour), or a recent movie source by path.
     var onRemoveRecent: ((String) -> Void)?
     var onRemoveVideo: ((String) -> Void)?
-    private let supersampleSwitch = NSSwitch()
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
-    private let freezeButton = NSButton(title: "", target: nil, action: nil)
     private let temperatureAutoSwitch = NSButton()
     private let colorSwitch = NSSwitch()
-    private let fgMaskSwitch = NSSwitch()
-    private let fgBlendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     /// Foreground blend modes, in the shader's order; Normal is 0.
     static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
     private var colorBody: NSView!
@@ -289,7 +294,6 @@ final class ControlsView: NSView {
     /// Apple mode: open Video Effects, save the green image, and a status line.
     var onOpenVideoEffects: (() -> Void)?
     var onSaveGreenImage: (() -> Void)?
-    private let mirrorSwitch = NSSwitch()
     private let sinkDot = StatusDot()
     private var sinkGroup: NSView!
     private var showSinkDetail = false
@@ -362,51 +366,27 @@ final class ControlsView: NSView {
         connectedRow.isHidden = true
         self.connectedRow = connectedRow
 
-        // Source: camera, then switch rows.
-        sourceButton.target = self
-        sourceButton.action = #selector(sourceTapped)
-        supersampleSwitch.target = self; supersampleSwitch.action = #selector(supersampleChanged)
         trackSwitch.target = self; trackSwitch.action = #selector(trackChanged)
-        mirrorSwitch.target = self; mirrorSwitch.action = #selector(mirrorChanged)
-        let toggles = NSStackView(views: [
-            inlineSwitch("4K", supersampleSwitch, tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work."),
-            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored."),
-        ])
-        toggles.spacing = 14
-        toggles.distribution = .equalSpacing
-        freezeButton.bezelStyle = .accessoryBarAction
-        freezeButton.isBordered = false
-        freezeButton.imagePosition = .imageOnly
-        freezeButton.target = self
-        freezeButton.action = #selector(freezeTapped)
-        frozen = false
-        stack.addArrangedSubview(group("Source", trailing: freezeButton, rows: [sourceButton, toggles]))
 
-        // Layers: a label row with the layer's options on the right, then a
-        // full-width button that opens the picker: None, the test page, recent
-        // files, web pages and colours, with + to add more.
-        backgroundButton.target = self; backgroundButton.action = #selector(backgroundTapped)
-        foregroundButton.target = self; foregroundButton.action = #selector(foregroundTapped)
-        fgMaskSwitch.target = self; fgMaskSwitch.action = #selector(fgMaskToggled)
-        fgMaskSwitch.controlSize = .mini
-        fgBlendPopup.addItems(withTitles: Self.blendModes)
-        fgBlendPopup.controlSize = .small
-        fgBlendPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        fgBlendPopup.target = self; fgBlendPopup.action = #selector(fgBlendModeChanged)
-        let maskTip = "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything."
-        let blendTip = "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top."
-        fgMaskSwitch.toolTip = maskTip
-        fgBlendPopup.toolTip = blendTip
-        let fgOptions = NSStackView(views: [
-            symbolLabel("person.and.background.dotted", tip: maskTip), fgMaskSwitch,
-            symbolLabel("camera.filters", tip: blendTip), fgBlendPopup,
-        ])
-        fgOptions.spacing = 5
-        fgOptions.setCustomSpacing(14, after: fgMaskSwitch)
-        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [
-            layerHeader("Background", options: nil), backgroundButton,
-            layerHeader("Foreground", options: fgOptions), foregroundButton,
-        ]))
+        // Source, Background, Foreground: tiles above the preview. Each has a
+        // picker button at its top right and its options at the bottom right.
+        supersampleButton.target = self; supersampleButton.action = #selector(supersampleChanged)
+        mirrorButton.target = self; mirrorButton.action = #selector(mirrorChanged)
+        freezeButton.target = self; freezeButton.action = #selector(freezeTapped)
+        fgMaskButton.target = self; fgMaskButton.action = #selector(fgMaskToggled)
+        fgBlendButton.target = self; fgBlendButton.action = #selector(fgBlendTapped)
+        frozen = false
+        sourceTile = LayerTile(title: "Source", options: [supersampleButton, mirrorButton, freezeButton])
+        backgroundTile = LayerTile(title: "Background", options: [])
+        foregroundTile = LayerTile(title: "Foreground", options: [fgMaskButton, fgBlendButton])
+        sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
+        backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
+        foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
+        for tile in [sourceTile!, backgroundTile!, foregroundTile!] { layerStrip.addArrangedSubview(tile) }
+        layerStrip.orientation = .horizontal
+        layerStrip.distribution = .fillEqually
+        layerStrip.spacing = 10
+        layerStrip.translatesAutoresizingMaskIntoConstraints = false
         picker.onSelect = { [weak self] value in self?.pickerChose(value) }
         picker.onRemove = { [weak self] value in self?.pickerRemoved(value) }
         picker.onAdd = { [weak self] kind, text in self?.pickerAdded(kind, text) }
@@ -671,17 +651,6 @@ final class ControlsView: NSView {
         return box
     }
 
-    /// Label and compact switch side by side, for several on one line.
-    private func inlineSwitch(_ title: String, _ toggle: NSSwitch, tip: String) -> NSView {
-        toggle.controlSize = .mini
-        toggle.toolTip = tip
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12)
-        label.toolTip = tip
-        let row = NSStackView(views: [label, toggle])
-        row.spacing = 5
-        return row
-    }
 
     /// A list row: label on the left, a compact switch on the right.
     private func switchRow(_ title: String, _ toggle: NSSwitch, tip: String) -> NSView {
@@ -795,9 +764,10 @@ final class ControlsView: NSView {
         if let current = sections.flatMap(\.items).first(where: { $0.value == sourceSelection }) {
             var shown = current
             if case .image = current.thumbnail { shown.thumbnail = .symbol("web.camera") }   // no stale frame in the sidebar
-            sourceButton.show(shown)
+            sourceTile.show(shown)
+            scheduleSourceThumbnail()
         } else {
-            sourceButton.show(PickerItem(value: "", title: "No source", thumbnail: .symbol("video.slash")))
+            sourceTile.show(PickerItem(value: "", title: "No source", thumbnail: .symbol("video.slash")))
         }
         if case .source? = pickerTarget { picker.update(sections: sections, selected: sourceSelection) }
     }
@@ -833,8 +803,10 @@ final class ControlsView: NSView {
         shadowSwitch.state = params.shadowEnabled > 0.5 ? .on : .off
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
         colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
-        fgMaskSwitch.state = params.fgMasked > 0.5 ? .on : .off
-        fgBlendPopup.selectItem(at: min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1))
+        fgMaskButton.isOn = params.fgMasked > 0.5
+        fgBlendValue = min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1)
+        fgBlendButton.isOn = fgBlendValue != 0
+        fgBlendButton.toolTip = "Blend: \(Self.blendModes[fgBlendValue]). How the foreground combines with what is under it, as in an image editor." 
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -860,7 +832,7 @@ final class ControlsView: NSView {
         var item = layerItem(value, slot: slot)
         if case .image = item.thumbnail, value != Self.testPageTitle { item.thumbnail = .web(URL(string: value) ?? URL(string: "https://example.com")!) }
         if case .image = item.thumbnail, value == Self.testPageTitle { item.thumbnail = .symbol("face.smiling") }
-        (slot == .foreground ? foregroundButton : backgroundButton).show(item)
+        (slot == .foreground ? foregroundTile : backgroundTile)?.show(item)
         if case .layer(let s)? = pickerTarget, s == slot { picker.update(sections: layerSections(slot), selected: value) }
     }
 
@@ -946,14 +918,14 @@ final class ControlsView: NSView {
 
     func showSourcePicker() {
         pickerTarget = .source
-        picker.show(title: "Source", sections: sourceSections(), selected: sourceSelection, from: sourceButton)
+        picker.show(title: "Source", sections: sourceSections(), selected: sourceSelection, from: sourceTile.pickerButton, edge: .minY)
     }
 
     /// Open a layer's picker; `entry` opens the web or colour field at once.
     func showLayerPicker(_ slot: LayerSlot, entry: PickerAddKind? = nil) {
         pickerTarget = .layer(slot)
         picker.show(title: slot == .foreground ? "Foreground" : "Background", sections: layerSections(slot),
-                    selected: layerValues[slot], from: slot == .foreground ? foregroundButton : backgroundButton, openEntry: entry)
+                    selected: layerValues[slot], from: (slot == .foreground ? foregroundTile : backgroundTile).pickerButton, edge: .minY, openEntry: entry)
     }
 
     private func pickerChose(_ value: String) {
@@ -983,28 +955,11 @@ final class ControlsView: NSView {
         }
     }
 
-    /// A row with the layer's name on the left and its options on the right.
-    private func layerHeader(_ title: String, options: NSView?) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        label.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let row = NSStackView(views: [label] + (options.map { [$0] } ?? []))
-        row.distribution = .fill
-        return row
-    }
 
-    private func symbolLabel(_ name: String, tip: String) -> NSView {
-        let v = NSImageView(image: NSImage(systemSymbolName: name, accessibilityDescription: tip) ?? NSImage())
-        v.symbolConfiguration = .init(pointSize: 12, weight: .regular)
-        v.contentTintColor = .secondaryLabelColor
-        v.toolTip = tip
-        return v
-    }
 
     var supersample: Bool {
-        get { supersampleSwitch.state == .on }
-        set { supersampleSwitch.state = newValue ? .on : .off }
+        get { supersampleButton.isOn }
+        set { supersampleButton.isOn = newValue }
     }
     var trackFace: Bool {
         get { trackSwitch.state == .on }
@@ -1015,8 +970,8 @@ final class ControlsView: NSView {
         set { depthSwitch.state = newValue ? .on : .off }
     }
     var mirrorPreview: Bool {
-        get { mirrorSwitch.state == .on }
-        set { mirrorSwitch.state = newValue ? .on : .off }
+        get { mirrorButton.isOn }
+        set { mirrorButton.isOn = newValue }
     }
 
     var status: String {
@@ -1049,7 +1004,7 @@ final class ControlsView: NSView {
     // MARK: Actions
 
 
-    @objc private func supersampleChanged() { onSupersample?(supersampleSwitch.state == .on) }
+    @objc private func supersampleChanged() { supersampleButton.isOn.toggle(); onSupersample?(supersampleButton.isOn) }
     @objc private func trackChanged() { refreshEnabledStates(); onTrackFace?(trackSwitch.state == .on) }
     @objc private func depthChanged() { onShadowFollowsFace?(depthSwitch.state == .on) }
     @objc private func shadowToggled() {
@@ -1060,8 +1015,28 @@ final class ControlsView: NSView {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
-    @objc private func fgMaskToggled() { onParam?(\.fgMasked, fgMaskSwitch.state == .on ? 1 : 0) }
-    @objc private func fgBlendModeChanged() { onParam?(\.fgBlend, Float(fgBlendPopup.indexOfSelectedItem)) }
+    @objc private func fgMaskToggled() { fgMaskButton.isOn.toggle(); onParam?(\.fgMasked, fgMaskButton.isOn ? 1 : 0) }
+
+    /// The blend modes as a menu under the button, the current one checked.
+    @objc private func fgBlendTapped() {
+        let menu = NSMenu()
+        for (i, name) in Self.blendModes.enumerated() {
+            let item = NSMenuItem(title: name, action: #selector(fgBlendChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            item.state = i == fgBlendValue ? .on : .off
+            menu.addItem(item)
+            if i == 0 { menu.addItem(.separator()) }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: fgBlendButton)
+    }
+
+    @objc private func fgBlendChosen(_ sender: NSMenuItem) {
+        fgBlendValue = sender.tag
+        fgBlendButton.isOn = sender.tag != 0
+        fgBlendButton.toolTip = "Blend: \(Self.blendModes[sender.tag]). How the foreground combines with what is under it, as in an image editor."
+        onParam?(\.fgBlend, Float(sender.tag))
+    }
     @objc private func colorToggled() {
         refreshEnabledStates()
         onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)
@@ -1116,9 +1091,8 @@ final class ControlsView: NSView {
     /// Pause shows while live; play shows while frozen.
     var frozen: Bool = false {
         didSet {
-            let name = frozen ? "play.fill" : "pause.fill"
-            freezeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: frozen ? "Resume live video" : "Freeze frame")
-            freezeButton.contentTintColor = frozen ? .controlAccentColor : .secondaryLabelColor
+            freezeButton.setSymbol(frozen ? "play.fill" : "pause.fill", description: frozen ? "Resume live video" : "Freeze frame")
+            freezeButton.isOn = frozen
             freezeButton.toolTip = frozen
                 ? "Frozen on one frame. Click to go back to live video."
                 : "Freeze the current frame so you can tune the key without movement. The virtual camera shows the frozen frame until you resume."
@@ -1189,7 +1163,18 @@ final class ControlsView: NSView {
         }
     }
 
-    @objc private func mirrorChanged() { onMirrorPreview?(mirrorSwitch.state == .on) }
+    @objc private func mirrorChanged() { mirrorButton.isOn.toggle(); onMirrorPreview?(mirrorButton.isOn) }
+
+    /// The current camera's tile shows a still from it, taken once frames are flowing.
+    private func scheduleSourceThumbnail() {
+        guard let selection = sourceSelection, selection.hasPrefix("camera:") else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, sourceSelection == selection, let image = currentFrameImage?(),
+                  var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
+            item.thumbnail = .image(image)
+            sourceTile.show(item)
+        }
+    }
 
     @objc private func connectedTapped() {
         showSinkDetail.toggle()

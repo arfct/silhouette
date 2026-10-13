@@ -268,54 +268,6 @@ final class ThumbnailView: NSView {
     }
 }
 
-// MARK: - Sidebar button
-
-/// Full-width button in the sidebar showing the current choice; opens the picker.
-final class PickerButton: NSButton {
-    private let thumb = ThumbnailView(frame: .zero)
-    private let label = NSTextField(labelWithString: "")
-    private let chevron = NSImageView()
-
-    init() {
-        super.init(frame: .zero)
-        title = ""
-        bezelStyle = .push
-        setButtonType(.momentaryPushIn)
-        thumb.translatesAutoresizingMaskIntoConstraints = false
-        thumb.symbolPointSize = 10
-        thumb.layer?.cornerRadius = 3
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.lineBreakMode = .byTruncatingTail
-        label.font = .systemFont(ofSize: NSFont.systemFontSize)
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)
-        chevron.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
-        chevron.contentTintColor = .secondaryLabelColor
-        for v in [thumb, label, chevron] as [NSView] { addSubview(v) }
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 30),
-            thumb.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            thumb.centerYAnchor.constraint(equalTo: centerYAnchor),
-            thumb.widthAnchor.constraint(equalToConstant: 32),
-            thumb.heightAnchor.constraint(equalToConstant: 18),
-            label.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: 8),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -6),
-            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func show(_ item: PickerItem) {
-        label.stringValue = item.title
-        toolTip = item.tooltip ?? item.title
-        thumb.show(item.thumbnail)
-    }
-}
-
 // MARK: - Popover
 
 /// A grid of 16:9 tiles with labels, in sections with + buttons, shown in a popover.
@@ -330,7 +282,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
 
     var isShown: Bool { popover.isShown }
 
-    func show(title: String, sections: [PickerSection], selected: String?, from view: NSView, openEntry: PickerAddKind? = nil) {
+    func show(title: String, sections: [PickerSection], selected: String?, from view: NSView, edge: NSRectEdge = .maxX, openEntry: PickerAddKind? = nil) {
         let vc = PickerViewController(title: title, sections: sections, selected: selected)
         vc.onSelect = { [weak self] value in self?.close(); self?.onSelect?(value) }
         vc.onRemove = { [weak self] value in self?.onRemove?(value) }
@@ -344,7 +296,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
-        popover.show(relativeTo: view.bounds, of: view, preferredEdge: .maxX)
+        popover.show(relativeTo: view.bounds, of: view, preferredEdge: edge)
         if let openEntry { vc.openEntry(openEntry) }
     }
 
