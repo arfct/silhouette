@@ -100,7 +100,8 @@ final class LayerTile: NSView {
 
         let pad: CGFloat = 7
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalTo: widthAnchor, multiplier: 9.0 / 16.0),
+            // At least 16:9; taller when the window has height to spare, cropped to the centre.
+            heightAnchor.constraint(greaterThanOrEqualTo: widthAnchor, multiplier: 9.0 / 16.0),
             thumb.leadingAnchor.constraint(equalTo: leadingAnchor),
             thumb.trailingAnchor.constraint(equalTo: trailingAnchor),
             thumb.topAnchor.constraint(equalTo: topAnchor),
@@ -108,6 +109,11 @@ final class LayerTile: NSView {
             options.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
             options.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
         ])
+        // 16:9 by default. Above the content pane's hug (480) so a wide window grows
+        // the preview, below its fill-height (490) so a narrow one grows the tiles.
+        let natural = heightAnchor.constraint(equalTo: widthAnchor, multiplier: 9.0 / 16.0)
+        natural.priority = NSLayoutConstraint.Priority(485)
+        natural.isActive = true
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("Choose the \(title.lowercased())")
@@ -119,6 +125,7 @@ final class LayerTile: NSView {
         // A long file name truncates rather than widening the column (and the window).
         column.setClippingResistancePriority(.defaultLow, for: .horizontal)
         column.setHuggingPriority(.defaultLow, for: .horizontal)
+        column.setHuggingPriority(NSLayoutConstraint.Priority(800), for: .vertical)
         widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         caption.widthAnchor.constraint(lessThanOrEqualTo: column.widthAnchor).isActive = true
         self.column = column

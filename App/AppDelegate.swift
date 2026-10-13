@@ -1066,10 +1066,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let area = NSLayoutGuide()
         contentHost.addLayoutGuide(area)
         previewLeading = area.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor, constant: settings.sidebarVisible ? 0 : 12)
-        let fullWidth = previewBox.widthAnchor.constraint(equalTo: area.widthAnchor)
-        // Below the window's own size, so a short window shrinks the preview
-        // (and the tiles above it) instead of growing past the screen.
-        fullWidth.priority = .dragThatCannotResizeWindow
+        // The preview (with the tiles above it) is as tall as the window allows
+        // and pinned to the right; the content pane hugs it, so the sidebar takes
+        // whatever width is left. Both sit below the window's own size, so a
+        // short window shrinks the preview instead of growing past the screen.
+        let fillHeight = previewBox.bottomAnchor.constraint(equalTo: area.bottomAnchor)
+        fillHeight.priority = .dragThatCannotResizeWindow
+        let hugPreview = previewBox.leadingAnchor.constraint(equalTo: area.leadingAnchor)
+        hugPreview.priority = NSLayoutConstraint.Priority(480)
         NSLayoutConstraint.activate([
             previewLeading,
             area.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -12),
@@ -1088,9 +1092,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
             controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
             previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),
-            previewBox.leadingAnchor.constraint(equalTo: area.leadingAnchor),   // left-aligned when height-limited
+            previewBox.trailingAnchor.constraint(equalTo: area.trailingAnchor),   // right-aligned
+            previewBox.leadingAnchor.constraint(greaterThanOrEqualTo: area.leadingAnchor),
             previewBox.bottomAnchor.constraint(lessThanOrEqualTo: area.bottomAnchor),
-            fullWidth,
+            fillHeight,
+            hugPreview,
             preview.leadingAnchor.constraint(equalTo: previewContent.leadingAnchor),
             preview.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor),
             preview.topAnchor.constraint(equalTo: previewContent.topAnchor),
@@ -1102,8 +1108,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let sidebarController = NSViewController()
         sidebarController.view = controls
         sidebarItem = NSSplitViewItem(viewController: sidebarController)
-        sidebarItem.minimumThickness = ControlsView.width   // fixed width: no dragging
-        sidebarItem.maximumThickness = ControlsView.width
+        sidebarItem.minimumThickness = ControlsView.width   // grows to fill what the preview leaves
+        sidebarItem.maximumThickness = NSSplitViewItem.unspecifiedDimension
         sidebarItem.canCollapse = true
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
         sidebarItem.isCollapsed = !settings.sidebarVisible

@@ -382,11 +382,16 @@ final class ControlsView: NSView {
         sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
         backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
         foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
-        for tile in [sourceTile!, backgroundTile!, foregroundTile!] { layerStrip.addArrangedSubview(tile.column) }
+        for tile in [sourceTile!, backgroundTile!, foregroundTile!] {
+            layerStrip.addArrangedSubview(tile.column)
+            // Exactly a third of the row, so nothing (a long caption, the fill-height rule) can widen a tile.
+            tile.column.widthAnchor.constraint(equalTo: layerStrip.widthAnchor, multiplier: 1.0 / 3.0, constant: -20.0 / 3.0).isActive = true
+        }
         layerStrip.orientation = .horizontal
         layerStrip.distribution = .fillEqually
         layerStrip.alignment = .top
         layerStrip.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        layerStrip.setHuggingPriority(NSLayoutConstraint.Priority(800), for: .vertical)   // never stretch to fill height
         layerStrip.spacing = 10
         layerStrip.translatesAutoresizingMaskIntoConstraints = false
         picker.onSelect = { [weak self] value in self?.pickerChose(value) }
@@ -501,7 +506,7 @@ final class ControlsView: NSView {
         colorStack.spacing = 8
         for v in colorStack.arrangedSubviews { v.widthAnchor.constraint(equalTo: colorStack.widthAnchor).isActive = true }
         colorBody = colorStack
-        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [colorStack], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
+        stack.addArrangedSubview(group("Lighting", trailing: colorSwitch, rows: [colorStack], tip: "Lighting and colour corrections applied to your image after keying, so it sits in the background."))
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
         offsetPad.onChange = { [weak self] v in
