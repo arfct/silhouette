@@ -13,7 +13,7 @@ struct PickerItem {
         case color(NSColor)
         /// An image or movie file; the thumbnail loads in the background.
         case file(URL)
-        /// A web page: its favicon when one loads, otherwise a globe.
+        /// A web page, shown as a globe.
         case web(URL)
         /// A ready-made picture, such as the live camera frame or a page snapshot.
         case image(NSImage)
@@ -125,22 +125,6 @@ final class ThumbnailLoader {
         }
     }
 
-    /// The site's /favicon.ico, when it has one.
-    func favicon(for url: URL, completion: @escaping (NSImage?) -> Void) {
-        guard let host = url.host, let icon = URL(string: "https://\(host)/favicon.ico") else { completion(nil); return }
-        let key = "favicon:" + host
-        if let hit = cached(key) { completion(hit); return }
-        if failed.contains(key) { completion(nil); return }
-        guard begin(key, completion) else { return }
-        var request = URLRequest(url: icon, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 8)
-        request.setValue("image/*", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
-            let ok = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
-            let image = ok ? data.flatMap(NSImage.init(data:)) : nil
-            self?.finish(key, image.flatMap { $0.isValid && $0.size.width > 0 ? $0 : nil })
-        }.resume()
-    }
-
     /// True when this caller should start the load; false when one is already running.
     private func begin(_ key: String, _ completion: @escaping (NSImage?) -> Void) -> Bool {
         if waiting[key] != nil { waiting[key]!.append(completion); return false }
@@ -158,7 +142,7 @@ final class ThumbnailLoader {
 }
 
 /// Draws a thumbnail into a layer: aspect-filled pictures, centred symbols and
-/// favicons on a neutral fill, colours over a checkerboard when translucent.
+/// on a neutral fill, colours over a checkerboard when translucent.
 final class ThumbnailView: NSView {
     private let pictureLayer = CALayer()
     private let symbolView = NSImageView()
@@ -229,13 +213,8 @@ final class ThumbnailView: NSView {
                 symbolView.image = nil
                 picture(image)
             }
-        case .web(let url):
+        case .web:
             symbol("globe")
-            ThumbnailLoader.shared.favicon(for: url) { [weak self] image in
-                guard let self, mine == token, let image else { return }
-                symbolView.contentTintColor = nil
-                symbolView.image = image
-            }
         }
         needsDisplay = true
         needsLayout = true

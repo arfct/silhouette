@@ -259,6 +259,18 @@ final class ControlsView: NSView {
     private(set) var foregroundTile: LayerTile!
     /// The row of three tiles; the window places it above the preview.
     let layerStrip = NSStackView()
+    /// Mirror and Pause, which the window places on the preview's bottom-right corner.
+    let previewButtons = NSStackView()
+    /// Mirroring applies to live cameras only; for movies and the test pattern the button dims.
+    var mirrorAvailable = true {
+        didSet {
+            mirrorButton.isEnabled = mirrorAvailable
+            mirrorButton.alphaValue = mirrorAvailable ? 1 : 0.4
+            mirrorButton.toolTip = mirrorAvailable
+                ? "Mirror the preview like a mirror. The virtual camera output and the source are never mirrored."
+                : "Movies and the test pattern always show as recorded. Mirroring applies to live cameras."
+        }
+    }
     private let picker = PickerPopover()
     private enum PickerTarget { case source, layer(LayerSlot) }
     private var pickerTarget: PickerTarget?
@@ -376,7 +388,11 @@ final class ControlsView: NSView {
         fgMaskButton.target = self; fgMaskButton.action = #selector(fgMaskToggled)
         fgBlendButton.target = self; fgBlendButton.action = #selector(fgBlendTapped)
         frozen = false
-        sourceTile = LayerTile(title: "Source", options: [supersampleButton, mirrorButton, freezeButton])
+        sourceTile = LayerTile(title: "Source", options: [supersampleButton])
+        // Mirror and Pause act on the preview, so they sit on it rather than on the Source tile.
+        for button in [mirrorButton, freezeButton] { previewButtons.addArrangedSubview(button) }
+        previewButtons.spacing = 6
+        previewButtons.translatesAutoresizingMaskIntoConstraints = false
         backgroundTile = LayerTile(title: "Background", options: [])
         foregroundTile = LayerTile(title: "Foreground", options: [fgMaskButton, fgBlendButton])
         sourceTile.onPick = { [weak self] in self?.showSourcePicker() }

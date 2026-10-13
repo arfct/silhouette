@@ -921,6 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mirrored = settings.mirrorPreview && liveCamera
         preview.mirrored = mirrored
         controls.mirrorOffsetPad = mirrored
+        controls.mirrorAvailable = liveCamera
         background.previewMirrored = mirrored
         foreground.previewMirrored = mirrored
     }
@@ -1059,6 +1060,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statsBadge.translatesAutoresizingMaskIntoConstraints = false
         statsBadge.addSubview(statsLabel)
         previewContent.addSubview(statsBadge)
+        previewContent.addSubview(controls.previewButtons)
         // 16:9 like the output, as large as the insets allow, pinned to the top.
         let aspect = CGFloat(VirtualCameraConstants.width) / CGFloat(VirtualCameraConstants.height)
         // The sidebar already pads its right edge by 12, so the box starts at the
@@ -1085,6 +1087,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             statsBadge.heightAnchor.constraint(equalToConstant: 18),
             statsBadge.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -8),
             statsBadge.topAnchor.constraint(equalTo: previewContent.topAnchor, constant: 8),
+            controls.previewButtons.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -10),
+            controls.previewButtons.bottomAnchor.constraint(equalTo: previewContent.bottomAnchor, constant: -10),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
             // Source, Background, Foreground above the preview, each a third of its width.
             // Captions in the title bar, level with the stats; tiles start where the preview used to.

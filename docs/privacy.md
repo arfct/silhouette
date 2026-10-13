@@ -23,7 +23,7 @@ Face tracking is off by default. When you turn it on, it runs on your Mac with A
 
 ## Web pages you choose
 
-If you enter a web address as a background or foreground, Silhouette loads that page directly from its site, the same way a browser does. That site may receive your IP address and set cookies under its own privacy policy. To show the page's icon in the layer picker, Silhouette also requests the site's standard icon file from the same site. Silhouette does not send any other information to it.
+If you enter a web address as a background or foreground, Silhouette loads that page directly from its site, the same way a browser does. That site may receive your IP address and set cookies under its own privacy policy. Silhouette does not send any other information to it.
 
 ## Files you choose
 
