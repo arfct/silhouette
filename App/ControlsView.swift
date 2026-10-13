@@ -14,17 +14,21 @@ final class RangeSlider: NSControl {
     /// below `lower` and fading to opaque at `upper`: the key's effect, drawn.
     var colorAt: ((Float) -> NSColor)? { didSet { needsDisplay = true } }
 
+    /// Track height: a mini switch's, so the swatch and Auto beside it line up.
+    static let trackHeight: CGFloat = 18
     private let knobRadius: CGFloat = 7
+    /// Thumb centres stay this far from the ends, inside the capsule.
+    private var inset: CGFloat { Self.trackHeight / 2 }
     private var activeThumb = 0
 
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 20) }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: Self.trackHeight) }
 
     private func x(for v: Float) -> CGFloat {
         let t = min(max((v - minValue) / (maxValue - minValue), 0), 1)   // typed values may sit outside the track
-        return knobRadius + CGFloat(t) * (bounds.width - 2 * knobRadius)
+        return inset + CGFloat(t) * (bounds.width - 2 * inset)
     }
     private func value(forX x: CGFloat) -> Float {
-        let t = Float((x - knobRadius) / max(bounds.width - 2 * knobRadius, 1))
+        let t = Float((x - inset) / max(bounds.width - 2 * inset, 1))
         return min(max(minValue + t * (maxValue - minValue), minValue), maxValue)
     }
 
@@ -33,7 +37,7 @@ final class RangeSlider: NSControl {
         if let colorAt {
             drawColorTrack(colorAt, midY: midY)
         } else {
-            let track = NSRect(x: knobRadius, y: midY - 2, width: bounds.width - 2 * knobRadius, height: 4)
+            let track = NSRect(x: 0, y: midY - 2, width: bounds.width, height: 4)
             NSColor.tertiaryLabelColor.withAlphaComponent(0.35).setFill()
             NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
             let selected = NSRect(x: x(for: lower), y: midY - 2, width: max(x(for: upper) - x(for: lower), 0), height: 4)
@@ -55,9 +59,10 @@ final class RangeSlider: NSControl {
     /// A strip of the colours at each distance from the key: the key colour at
     /// the left, through neutral, toward its complement on the right.
     private func drawColorTrack(_ colorAt: (Float) -> NSColor, midY: CGFloat) {
-        let h: CGFloat = 10
-        let track = NSRect(x: knobRadius, y: midY - h / 2, width: bounds.width - 2 * knobRadius, height: h)
-        let clip = NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3)
+        let h = Self.trackHeight - 1
+        // Full width, as tall as a switch, with fully rounded ends; the thumbs sit inside it.
+        let track = NSRect(x: 0.5, y: midY - h / 2, width: bounds.width - 1, height: h)
+        let clip = NSBezierPath(roundedRect: track, xRadius: h / 2, yRadius: h / 2)
         NSGraphicsContext.saveGraphicsState()
         clip.addClip()
         let step: CGFloat = 0.5
@@ -219,10 +224,11 @@ final class ControlsView: NSView {
     var onTrackFace: ((Bool) -> Void)?
     var onShadowFollowsFace: ((Bool) -> Void)?
     var onMirrorPreview: ((Bool) -> Void)?
-    var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
     /// 0 = chroma key, 1 = person segmentation.
     var onMatteSource: ((Int) -> Void)?
+    /// Apple Chromakey was chosen: explain the Video Effects setup.
+    var onAppleChromakey: (() -> Void)?
     var onTemperatureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
@@ -277,11 +283,10 @@ final class ControlsView: NSView {
     private var shadowBody: NSView!
     private var shadowGroup: NSView!
     private let keySwitch = NSSwitch()
-    private var keyTools: NSStackView!
-    private let matteControl = NSSegmentedControl(labels: ["Green screen", "Person", "Apple"], trackingMode: .selectOne, target: nil, action: nil)
+    /// The Chromakey section's title, as a pull-down: Chromakey, Background Removal, Apple Chromakey…
+    private let matteMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    private var keyRangeRow: NSView!
     /// Apple mode: open Video Effects, save the green image, and a status line.
-    private var systemRow: NSStackView!
-    private let systemStatus = NSTextField(wrappingLabelWithString: "")
     var onOpenVideoEffects: (() -> Void)?
     var onSaveGreenImage: (() -> Void)?
     private let mirrorSwitch = NSSwitch()
@@ -293,7 +298,6 @@ final class ControlsView: NSView {
     private let connectedDot = StatusDot()
     private var chromaBody: NSView!
     private var connectedRow: NSStackView!
-    private let chromaDisclosure = NSButton(title: "", target: nil, action: nil)
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
@@ -415,21 +419,28 @@ final class ControlsView: NSView {
         // Key: swatch, Pick and Auto in the header; range and spill below.
         keySwatch.isBordered = false
         keySwatch.wantsLayer = true
-        keySwatch.layer?.cornerRadius = 4
+        keySwatch.layer?.cornerRadius = RangeSlider.trackHeight / 2   // a capsule, like the track beside it
         keySwatch.layer?.borderWidth = 1
         keySwatch.layer?.borderColor = NSColor.black.withAlphaComponent(0.2).cgColor
         keySwatch.widthAnchor.constraint(equalToConstant: 36).isActive = true   // a mini switch's width
-        keySwatch.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        keySwatch.heightAnchor.constraint(equalToConstant: RangeSlider.trackHeight).isActive = true
         keySwatch.target = self
         keySwatch.action = #selector(pickKeyTapped)
         keySwatch.toolTip = "The backdrop colour being removed. Click to show the unkeyed image, then click the backdrop in the preview. Esc cancels."
-        autoButton.title = "Auto"; autoButton.target = self; autoButton.action = #selector(autoKeyTapped); autoButton.controlSize = .mini
+        autoButton.title = ""
+        autoButton.image = NSImage(systemSymbolName: "wand.and.sparkles", accessibilityDescription: "Auto")
+        autoButton.imagePosition = .imageOnly
+        autoButton.isBordered = false
+        autoButton.symbolConfiguration = .init(pointSize: 14, weight: .regular)
+        autoButton.contentTintColor = .secondaryLabelColor
+        autoButton.target = self; autoButton.action = #selector(autoKeyTapped)
+        autoButton.setContentHuggingPriority(.required, for: .horizontal)
+        autoButton.setAccessibilityLabel("Auto")
+        autoButton.heightAnchor.constraint(equalToConstant: RangeSlider.trackHeight).isActive = true
         autoButton.toolTip = "Find the backdrop colour and range from the edges of the frame over about a second, avoiding the face and body. Runs by itself when a new source is chosen."
         keySwitch.target = self; keySwitch.action = #selector(keyToggled)
         keySwitch.controlSize = .mini
         keySwitch.toolTip = "Key out the backdrop. Off passes the camera through untouched, so the background and shadow have no effect."
-        let keyTools = NSStackView(views: [keySwatch, autoButton, keySwitch]); keyTools.spacing = 8
-        self.keyTools = keyTools
         keyHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         keyHint.textColor = .secondaryLabelColor
         keyHint.preferredMaxLayoutWidth = Self.width - 48
@@ -439,30 +450,30 @@ final class ControlsView: NSView {
             self?.onParam?(\.tolerance, lo); self?.onParam?(\.softness, hi - lo); self?.updateCompositeValues()
         }
         keyRangeCell = rangeCell("Color Range", keyRange, tip: "How close a colour must be to the key colour to be removed, in percent of the full chroma span. Left value: fully removed. Right value: where the transition to opaque ends. Typical keys sit between 5 and 20; type or arrow past 30 if needed.")
-        // Chromakey: key colour and matte in one collapsible group.
-        matteControl.target = self
-        matteControl.action = #selector(matteChanged)
-        matteControl.selectedSegment = 0
-        matteControl.segmentDistribution = .fillEqually
-        matteControl.controlSize = .small
-        matteControl.toolTip = "Green screen keys a real backdrop by colour. Person finds you with on-device segmentation and needs no backdrop. Apple uses the Mac's own Background effect with a flat green image, then keys that green: the best edges without a backdrop, on cameras that support it."
-        let effectsButton = NSButton(title: "Video Effects…", target: self, action: #selector(openVideoEffectsTapped)); effectsButton.controlSize = .small
-        effectsButton.toolTip = "Open the system Video Effects panel. Turn on Background, then choose the green image as a custom background."
-        let greenButton = NSButton(title: "Save Green Image…", target: self, action: #selector(saveGreenTapped)); greenButton.controlSize = .small
-        greenButton.toolTip = "Save a plain green 1920×1080 image to use as the custom background in Video Effects."
-        let systemButtons = NSStackView(views: [effectsButton, greenButton]); systemButtons.spacing = 8
-        systemStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        systemStatus.textColor = .secondaryLabelColor
-        systemStatus.preferredMaxLayoutWidth = Self.width - 48
-        systemRow = NSStackView(views: [systemButtons, systemStatus])
-        systemRow.orientation = .vertical
-        systemRow.alignment = .leading
-        systemRow.spacing = 6
-        systemRow.isHidden = true
+        // Chromakey: the title is a pull-down for the matte, the swatch sits at
+        // its left, Auto sits beside the Color Range.
+        matteMenu.pullsDown = true
+        matteMenu.isBordered = false
+        matteMenu.addItem(withTitle: "")   // the pull-down's title, set in matteSource
+        for (title, tag) in [("Chromakey", 0), ("Background Removal", 1)] {
+            matteMenu.addItem(withTitle: title)
+            matteMenu.lastItem?.tag = tag
+            matteMenu.lastItem?.target = self
+            matteMenu.lastItem?.action = #selector(matteChosen(_:))
+        }
+        matteMenu.menu?.addItem(.separator())
+        matteMenu.addItem(withTitle: "Apple Chromakey…")
+        matteMenu.lastItem?.target = self
+        matteMenu.lastItem?.action = #selector(appleChromakeyChosen)
+        matteMenu.lastItem?.toolTip = "Use the Mac's own Background effect with a plain green image, then key that green: the best edges without a backdrop, on cameras that support it."
+        matteMenu.toolTip = "Chromakey removes a real backdrop by colour. Background Removal finds you with on-device segmentation and needs no backdrop. Apple Chromakey sets up the Mac's Background effect with a green image to key."
+        matteMenu.setContentHuggingPriority(.required, for: .horizontal)
+        let keyRangeRow = NSStackView(views: [keySwatch, keyRangeCell, autoButton])
+        keyRangeRow.spacing = 8
+        keyRangeRow.alignment = .bottom   // swatch and icon sit level with the track, not the title
+        self.keyRangeRow = keyRangeRow
         let body = NSStackView(views: [
-            matteControl,
-            systemRow,
-            keyRangeCell,
+            keyRangeRow,
             columns([sliderCell("Shrink", \.edge, 0...4, decimals: 1, tip: "Pulls the matte edge in by this many pixels (at 1920×1080) to trim fringes. The same value means the same amount on a 720p or 4K source."),
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
             columns([sliderCell("Desaturate", \.spill, 0...1, scale: 100, decimals: 0, tip: "Removes the backdrop's tint reflected onto hair and clothing, in percent."),
@@ -473,12 +484,8 @@ final class ControlsView: NSView {
         body.spacing = 8
         for v in body.arrangedSubviews { v.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         chromaBody = body
-        chromaDisclosure.bezelStyle = .disclosure
-        chromaDisclosure.setButtonType(.pushOnPushOff)
-        chromaDisclosure.target = self
-        chromaDisclosure.action = #selector(chromaToggled)
-        chromaDisclosure.toolTip = "Show or hide the chromakey controls"
-        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
+        stack.addArrangedSubview(group("Chromakey", titleView: matteMenu, trailing: keySwitch, rows: [body, keyHint]))
+        matteSource = 0
 
         // Colour: corrections applied to the keyed camera image only, after the matte.
         colorSwitch.target = self; colorSwitch.action = #selector(colorToggled)
@@ -511,7 +518,6 @@ final class ControlsView: NSView {
         for v in colorStack.arrangedSubviews { v.widthAnchor.constraint(equalTo: colorStack.widthAnchor).isActive = true }
         colorBody = colorStack
         stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [colorStack], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
-        chromakeyOpen = false
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
         offsetPad.onChange = { [weak self] v in
@@ -620,11 +626,22 @@ final class ControlsView: NSView {
 
     /// Settings-style group: an inset box with a header row (title left,
     /// optional trailing view right) and a vertical list of rows.
-    private func group(_ title: String, leading: NSView? = nil, trailing: NSView?, rows: [NSView], tip: String? = nil) -> NSView {
-        let header = NSTextField(labelWithString: title.uppercased())
-        header.toolTip = tip
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
-        header.textColor = .secondaryLabelColor
+    private func group(_ title: String, leading: NSView? = nil, titleView: NSView? = nil, trailing: NSView?, rows: [NSView], tip: String? = nil) -> NSView {
+        let label = NSTextField(labelWithString: title.uppercased())
+        label.toolTip = tip
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        let header: NSView
+        if let titleView {
+            // A custom title (the Chromakey pull-down) hugs its text; a spacer stretches instead.
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+            let titled = NSStackView(views: [titleView, spacer])
+            titled.spacing = 0
+            header = titled
+        } else {
+            header = label
+        }
         // The title stretches; whatever sits on the trailing edge stays right-aligned.
         header.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         trailing?.setContentHuggingPriority(.required, for: .horizontal)
@@ -793,12 +810,6 @@ final class ControlsView: NSView {
         connectedRow?.isHidden = !sinkConnected
     }
 
-    var chromakeyOpen: Bool = false {
-        didSet {
-            chromaBody.isHidden = !(chromakeyOpen && keySwitch.state == .on)
-            chromaDisclosure.state = chromakeyOpen ? .on : .off
-        }
-    }
 
     // MARK: State in
 
@@ -1097,10 +1108,7 @@ final class ControlsView: NSView {
         let shadowOn = shadowSwitch.state == .on
         let colorOn = colorSwitch.state == .on
         let trackOn = trackSwitch.state == .on
-        chromaBody.isHidden = !(keyOn && chromakeyOpen)
-        chromaDisclosure.isHidden = !keyOn
-        keySwatch.isHidden = !keyOn
-        autoButton.isHidden = !keyOn
+        chromaBody.isHidden = !keyOn
         shadowBody.isHidden = !(keyOn && shadowOn)
         overlayRow.isHidden = !trackOn
         highRateRow.isHidden = !trackOn
@@ -1152,14 +1160,17 @@ final class ControlsView: NSView {
 
     /// Which matte the chromakey group is set up for. Person hides the colour tools.
     var matteSource: Int {
-        get { matteControl.selectedSegment }
+        get { matteSourceValue }
         set {
-            matteControl.selectedSegment = newValue
-            let person = newValue == 1
-            systemRow.isHidden = newValue != 2
-            keyRangeCell.isHidden = person
-            keySwatch.isHidden = person
-            autoButton.isHidden = person
+            matteSourceValue = newValue == 1 ? 1 : 0   // Apple Chromakey keys like Chromakey
+            let person = matteSourceValue == 1
+            let title = person ? "Background Removal" : "Chromakey"
+            matteMenu.item(at: 0)?.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.labelColor.withAlphaComponent(0.72)])   // the pull-down dims its title; this lands on the other headers' grey
+            for item in matteMenu.itemArray where item.action == #selector(matteChosen(_:)) {
+                item.state = item.tag == matteSourceValue ? .on : .off
+            }
+            keyRangeRow.isHidden = person   // background removal has no key colour or range
             if let spill = cells[\.spill]?.cell {   // same slider, different job per mode
                 spill.label.stringValue = person ? "Decontaminate" : "Desaturate"
                 let tip = person
@@ -1169,18 +1180,21 @@ final class ControlsView: NSView {
             }
         }
     }
-    /// The Apple-mode status line: what the system effect is doing on this camera.
-    func showSystemStatus(_ text: String) { systemStatus.stringValue = text }
-    @objc private func openVideoEffectsTapped() { onOpenVideoEffects?() }
-    @objc private func saveGreenTapped() { onSaveGreenImage?() }
+    private var matteSourceValue = 0
 
-    @objc private func matteChanged() { matteSource = matteControl.selectedSegment; onMatteSource?(matteControl.selectedSegment) }
+    @objc private func matteChosen(_ sender: NSMenuItem) {
+        guard sender.tag != matteSourceValue else { return }
+        matteSource = sender.tag
+        onMatteSource?(sender.tag)
+    }
+
+    @objc private func appleChromakeyChosen() { onAppleChromakey?() }
 
     /// Auto is running: the button shows it and ignores clicks.
     var autoRunning: Bool = false {
         didSet {
             autoButton.isEnabled = !autoRunning
-            autoButton.title = autoRunning ? "Auto…" : "Auto"
+            autoButton.contentTintColor = autoRunning ? .controlAccentColor : .secondaryLabelColor
         }
     }
 
@@ -1202,10 +1216,6 @@ final class ControlsView: NSView {
         sinkGroup.isHidden = !showSinkDetail
     }
 
-    @objc private func chromaToggled() {
-        chromakeyOpen = chromaDisclosure.state == .on
-        onChromakeyOpen?(chromakeyOpen)
-    }
 
     /// Route a committed combo value: a fixed item, a colour, a file path, or a URL.
     private func commitLayer(_ slot: LayerSlot, _ raw: String) {

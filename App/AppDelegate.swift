@@ -57,7 +57,6 @@ struct Settings: Codable {
     var recentWebURLs: [String] = []
     /// Security-scoped bookmarks for the file paths in `recentWebURLs`.
     var fileBookmarks: [String: Data] = [:]
-    var chromakeyOpen = false
     var matteSource: Renderer.MatteSource = .chroma
     var temperatureAuto = false
     /// The layer over the keyed camera. The background keeps its original top-level keys.
@@ -113,8 +112,8 @@ struct Settings: Codable {
         mirrorPreview = (try? c.decodeIfPresent(Bool.self, forKey: .mirrorPreview)) ?? true
         shadowFollowsFace = (try? c.decodeIfPresent(Bool.self, forKey: .shadowFollowsFace)) ?? false
         // Keep only well-formed entries (a host with a dot, or localhost).
-        chromakeyOpen = (try? c.decodeIfPresent(Bool.self, forKey: .chromakeyOpen)) ?? false
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
+        if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
         temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
             if $0.hasPrefix("/") || $0.hasPrefix("#") { return true }
@@ -249,16 +248,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         renderer.onAutoTemperature = { [weak self] value in self?.controls.showTemperature(value) }
         controls.onOpenVideoEffects = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
         controls.onSaveGreenImage = { [weak self] in self?.saveGreenImage() }
+        controls.onAppleChromakey = { [weak self] in self?.showAppleChromakey() }
         controls.onMatteSource = { [weak self] raw in
             guard let self, let source = Renderer.MatteSource(rawValue: raw) else { return }
             settings.matteSource = source
             renderer.matteSource = source
             cancelAutoKey()
-            watchSystemBackground()
-            if source == .system {
-                // Take people straight to the switch they need.
-                if !systemBackgroundActive { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
-            }
             // Segmentation masks flicker frame to frame; a little Stabilize is the right default.
             if source == .person, renderer.keyParams.temporal == 0 {
                 renderer.update { $0.temporal = 0.3 }
@@ -296,11 +291,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         controls.shadowFollowsFace = settings.shadowFollowsFace
         controls.setRecents(settings.recentWebURLs)
-        controls.chromakeyOpen = settings.chromakeyOpen
-        controls.onChromakeyOpen = { [weak self] open in
-            self?.settings.chromakeyOpen = open
-            self?.settings.save()
-        }
         background.onError = { [weak self] message in self?.controls.status = message }
         foreground.onError = { [weak self] message in self?.controls.status = message }
 
@@ -760,41 +750,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Apple's Background effect as a green screen
 
-    private var systemBackgroundActive: Bool {
-        guard #available(macOS 15.0, *), let device = camera.currentDevice else { return false }
-        return device.isBackgroundReplacementActive
+    /// Apple Chromakey: macOS's Background effect replaces the room with a plain
+    /// green image, and Silhouette keys that green like a real green screen.
+    /// A dialog explains the setup and offers its two steps; afterwards the
+    /// section is in Chromakey mode, and Auto runs when the effect turns on.
+    private func showAppleChromakey() {
+        let alert = NSAlert()
+        alert.messageText = "Apple Chromakey"
+        alert.informativeText = """
+        macOS can replace the room behind you with an image, using the Background effect in Video Effects. Give it a plain green image and Silhouette removes that green like a real green screen, with cleaner edges than Background Removal.
+
+        1. Save the green image.
+        2. Open Video Effects, turn on Background, and choose the green image as a custom background.
+
+        \(appleChromakeyStatus())
+        """
+        let save = NSButton(title: "Save Green Image…", target: self, action: #selector(saveGreenImageAction))
+        let effects = NSButton(title: "Open Video Effects", target: self, action: #selector(openVideoEffectsAction))
+        let buttons = NSStackView(views: [save, effects])
+        buttons.spacing = 8
+        buttons.setFrameSize(buttons.fittingSize)
+        alert.accessoryView = buttons
+        alert.addButton(withTitle: "Done")
+        alert.beginSheetModal(for: window) { [weak self] _ in
+            guard let self else { return }
+            if settings.matteSource != .chroma {
+                settings.matteSource = .chroma
+                renderer.matteSource = .chroma
+                controls.matteSource = 0
+                settings.save()
+            }
+            armSystemBackgroundAuto = true
+            watchSystemBackground()
+        }
     }
 
-    /// In Apple mode, follow the current camera's Background effect: explain what
-    /// to do while it is off, and run Auto the moment it turns on.
+    @objc private func saveGreenImageAction() { saveGreenImage() }
+    @objc private func openVideoEffectsAction() { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
+
+    /// One line on whether the current camera can do this.
+    private func appleChromakeyStatus() -> String {
+        guard #available(macOS 15.0, *) else { return "The Background effect needs macOS 15 or later." }
+        guard let device = camera.currentDevice else { return "Choose a camera first: movies and the test pattern have no Video Effects." }
+        guard device.activeFormat.isBackgroundReplacementSupported else {
+            return "\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do."
+        }
+        return device.isBackgroundReplacementActive ? "The Background effect is on for \(device.localizedName)." : "\(device.localizedName) supports the Background effect."
+    }
+
+    /// Set after the Apple Chromakey dialog: run Auto when the current camera's
+    /// Background effect turns on, so the key locks onto its green.
+    private var armSystemBackgroundAuto = false
+
     private func watchSystemBackground() {
         backgroundEffectObservation = nil
-        guard settings.matteSource == .system else { return }
-        guard #available(macOS 15.0, *) else {
-            controls.showSystemStatus("Apple's Background effect needs macOS 15 or later. Use Person instead.")
-            return
+        guard armSystemBackgroundAuto, #available(macOS 15.0, *), let device = camera.currentDevice,
+              device.activeFormat.isBackgroundReplacementSupported else { return }
+        if device.isBackgroundReplacementActive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
         }
-        guard let device = camera.currentDevice else {
-            controls.showSystemStatus("Choose a camera. Movies and the test pattern have no system effects.")
-            return
-        }
-        guard device.activeFormat.isBackgroundReplacementSupported else {
-            controls.showSystemStatus("\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do; or use Person.")
-            return
-        }
-        let update: (Bool) -> Void = { [weak self] active in
-            guard let self else { return }
-            if active {
-                controls.showSystemStatus("Background effect is on. Keying its green.")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
-            } else {
-                controls.showSystemStatus("In Video Effects, turn on Background and pick the green image as a custom background. Silhouette keys it as soon as it appears.")
-            }
-        }
-        update(device.isBackgroundReplacementActive)
         backgroundEffectObservation = device.observe(\.isBackgroundReplacementActive, options: [.new]) { _, change in
-            let active = change.newValue ?? false
-            DispatchQueue.main.async { update(active) }
+            guard change.newValue == true else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
         }
     }
 
@@ -804,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.nameFieldStringValue = "Silhouette Green.png"
         panel.allowedContentTypes = [.png]
         panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
-        panel.beginSheetModal(for: window) { response in
+        let write: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else { return }
             let w = 1920, h = 1080
             guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -816,6 +833,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             CGImageDestinationAddImage(dest, image, nil)
             CGImageDestinationFinalize(dest)
         }
+        // From the Apple Chromakey dialog the window already has a sheet, so open on its own.
+        if window.attachedSheet != nil { panel.begin(completionHandler: write) } else { panel.beginSheetModal(for: window, completionHandler: write) }
     }
 
     private var currentSourceID: String {
