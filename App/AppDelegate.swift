@@ -31,8 +31,33 @@ struct SourceKey: Codable {
     var edge: Float?, feather: Float?, spill: Float?
 }
 
+/// What a preset holds: the scene, not the window, the recents, or the per-source key memory.
+struct Scene: Codable {
+    var params = KeyParams()
+    var cameraID: String?
+    var videoBookmark: Data?
+    var background = LayerSettings()
+    var foreground = LayerSettings()
+    var matteSource: Renderer.MatteSource = .chroma
+    var temperatureAuto = false
+    var supersample = false
+    var trackFace = false
+    var faceHighRate = false
+    var shadowFollowsFace = false
+}
+
+struct Preset: Codable {
+    var id: UUID
+    var name: String
+    var scene: Scene
+}
+
 struct Settings: Codable {
     var params = KeyParams()
+    /// Saved scenes. The live fields above and below are the current preset's
+    /// scene; `save()` writes them back into it, so every change is kept.
+    var presets: [Preset] = []
+    var currentPreset: UUID?
     var mode: BackgroundMode = .none
     var imagePath: String?
     var webURL: String?
@@ -61,6 +86,20 @@ struct Settings: Codable {
     var temperatureAuto = false
     /// The layer over the keyed camera. The background keeps its original top-level keys.
     var foreground = LayerSettings()
+
+    var scene: Scene {
+        get {
+            Scene(params: params, cameraID: cameraID, videoBookmark: videoBookmark, background: self[.background], foreground: foreground,
+                  matteSource: matteSource, temperatureAuto: temperatureAuto, supersample: supersample, trackFace: trackFace,
+                  faceHighRate: faceHighRate, shadowFollowsFace: shadowFollowsFace)
+        }
+        set {
+            params = newValue.params; cameraID = newValue.cameraID; videoBookmark = newValue.videoBookmark
+            self[.background] = newValue.background; foreground = newValue.foreground
+            matteSource = newValue.matteSource; temperatureAuto = newValue.temperatureAuto; supersample = newValue.supersample
+            trackFace = newValue.trackFace; faceHighRate = newValue.faceHighRate; shadowFollowsFace = newValue.shadowFollowsFace
+        }
+    }
 
     subscript(slot: LayerSlot) -> LayerSettings {
         get {
@@ -115,6 +154,8 @@ struct Settings: Codable {
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
         if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
         temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
+        presets = (try? c.decodeIfPresent([Preset].self, forKey: .presets)) ?? []
+        currentPreset = try? c.decodeIfPresent(UUID.self, forKey: .currentPreset)
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
             if $0.hasPrefix("/") || $0.hasPrefix("#") { return true }
             guard let host = URL(string: $0)?.host else { return false }
@@ -124,9 +165,16 @@ struct Settings: Codable {
 
     private static let key = "settings"
     static func load() -> Settings {
-        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) } ?? Settings()
+        var s = UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) } ?? Settings()
+        // There is always a current preset: the first launch with presets turns
+        // the existing settings into one called Default.
+        if s.presets.isEmpty { s.presets = [Preset(id: UUID(), name: "Default", scene: s.scene)] }
+        if !s.presets.contains(where: { $0.id == s.currentPreset }) { s.currentPreset = s.presets[0].id }
+        return s
     }
-    func save() {
+    /// Writes the live scene into the current preset, then persists everything.
+    mutating func save() {
+        if let i = presets.firstIndex(where: { $0.id == currentPreset }) { presets[i].scene = scene }
         if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key) }
     }
 }
@@ -180,6 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var failedStartsSinceReplace = 0
 
+    /// The Presets menu: one item per preset (⌘1 to ⌘9), rebuilt when it opens.
+    private let presetsMenu = NSMenu(title: "Presets")
     /// Menu bar item, so Silhouette keeps running with its window closed.
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
@@ -304,6 +354,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         restoreLayer(.background)
         restoreLayer(.foreground)
         updateTrackingNeeds()
+        controls.onPresetSelect = { [weak self] id in self?.selectPreset(id) }
+        controls.onPresetAdd = { [weak self] in self?.addPreset() }
+        controls.onPresetDuplicate = { [weak self] id in self?.addPreset(duplicating: id) }
+        controls.onPresetRename = { [weak self] id, name in self?.renamePreset(id, to: name) }
+        controls.onPresetDelete = { [weak self] id in self?.deletePreset(id) }
+        refreshPresetViews()
         controls.apply(params: renderer.keyParams)
         updateWindowChrome()
         startCamera()
@@ -717,6 +773,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // MARK: Params
+
+    // MARK: Presets
+
+    private func refreshPresetViews() {
+        controls.setPresets(settings.presets.map { ($0.id, $0.name) }, current: settings.currentPreset)
+    }
+
+    private func selectPreset(_ id: UUID) {
+        guard id != settings.currentPreset, let preset = settings.presets.first(where: { $0.id == id }) else { return }
+        settings.save()   // the outgoing preset keeps its latest state
+        settings.currentPreset = id
+        settings.scene = preset.scene
+        applyScene()
+        settings.save()
+        refreshPresetViews()
+    }
+
+    /// A new preset from the current scene (or another preset's), selected and ready to name.
+    private func addPreset(duplicating source: UUID? = nil) {
+        settings.save()
+        let base = source.flatMap { s in settings.presets.first { $0.id == s } }
+        let name = uniquePresetName(base.map { $0.name + " copy" } ?? "Preset \(settings.presets.count + 1)")
+        let preset = Preset(id: UUID(), name: name, scene: base?.scene ?? settings.scene)
+        settings.presets.append(preset)
+        let changes = base != nil && base!.id != settings.currentPreset
+        settings.currentPreset = preset.id
+        if changes { settings.scene = preset.scene; applyScene() }
+        settings.save()
+        refreshPresetViews()
+        controls.beginRenamingPreset(preset.id)
+    }
+
+    private func renamePreset(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let i = settings.presets.firstIndex(where: { $0.id == id }) else { refreshPresetViews(); return }
+        settings.presets[i].name = trimmed
+        settings.save()
+        refreshPresetViews()
+    }
+
+    private func deletePreset(_ id: UUID) {
+        guard let i = settings.presets.firstIndex(where: { $0.id == id }) else { return }
+        settings.presets.remove(at: i)
+        if settings.currentPreset == id {
+            if settings.presets.isEmpty {
+                // Nothing left: the live scene carries on as a new Default.
+                settings.presets = [Preset(id: UUID(), name: "Default", scene: settings.scene)]
+                settings.currentPreset = settings.presets[0].id
+            } else {
+                let next = settings.presets[min(i, settings.presets.count - 1)]
+                settings.currentPreset = next.id
+                settings.scene = next.scene
+                applyScene()
+            }
+        }
+        settings.save()
+        refreshPresetViews()
+    }
+
+    private func uniquePresetName(_ wanted: String) -> String {
+        let names = Set(settings.presets.map(\.name))
+        if !names.contains(wanted) { return wanted }
+        var n = 2
+        while names.contains("\(wanted) \(n)") { n += 1 }
+        return "\(wanted) \(n)"
+    }
+
+    /// Bring the renderer, camera, layers, and controls to the live scene in
+    /// `settings`, as at launch. The preset's key wins over the per-source key
+    /// memory, so that memory is pointed at this source first.
+    private func applyScene() {
+        let wasSupersampling = renderer.processScale == 2
+        imageFile = nil; foregroundFile = nil; videoFile = nil
+        cancelAutoKey()
+        renderer.keyParams = settings.params
+        renderer.processScale = settings.supersample ? 2 : 1
+        camera.preferHighResolution = settings.supersample
+        controls.supersample = settings.supersample
+        renderer.matteSource = settings.matteSource
+        controls.matteSource = settings.matteSource.rawValue
+        renderer.temperatureAuto = settings.temperatureAuto
+        controls.temperatureAuto = settings.temperatureAuto
+        renderer.trackingEnabled = settings.trackFace
+        faceTracker.isEnabled = settings.trackFace
+        controls.trackFace = settings.trackFace
+        controls.faceHighRate = settings.faceHighRate
+        controls.shadowFollowsFace = settings.shadowFollowsFace
+        if !settings.shadowFollowsFace { smoothedDepth = 1; renderer.shadowDepthScale = 1 }
+        if !settings.trackFace { preview.showFace(nil) }
+        restoreLayer(.background)
+        restoreLayer(.foreground)
+        controls.apply(params: renderer.keyParams)
+        updateWindowChrome()
+        keyedSourceID = currentSourceID
+        rememberKeyForSource()
+        devicesChanged()
+        if wasSupersampling != settings.supersample, let device = camera.currentDevice { camera.start(device: device) }
+    }
 
     /// Hold the newest frame and keep rendering it at the output rate, so key and
     /// shadow changes show immediately and the virtual camera never stalls.
@@ -1334,6 +1488,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         main.addItem(submenu(edit, title: "Edit"))
 
+        presetsMenu.delegate = self
+        main.addItem(submenu(presetsMenu, title: "Presets"))
+
         let view = NSMenu(title: "View")
         view.addItem(withTitle: "Keep on Top", action: #selector(toggleKeepOnTop), keyEquivalent: "t")
         let mirror = view.addItem(withTitle: "Mirror Preview", action: #selector(toggleMirrorPreview), keyEquivalent: "M")
@@ -1384,6 +1541,7 @@ private final class InvisibleDividerSplitView: NSSplitView {
 
 extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === presetsMenu { rebuildPresetsMenu(); return }
         guard menu === statusMenu else { return }
         menu.removeAllItems()
         let state = NSMenuItem(title: cameraInUse ? "Virtual camera in use" : "Virtual camera not in use", action: nil, keyEquivalent: "")
@@ -1411,4 +1569,33 @@ extension AppDelegate {
         return NSImage(cgImage: cg, size: .zero)
     }
     private static let thumbnailContext = CIContext(options: [.cacheIntermediates: false])
+}
+
+extension AppDelegate {
+    fileprivate func rebuildPresetsMenu() {
+        presetsMenu.removeAllItems()
+        for (i, preset) in settings.presets.enumerated() {
+            let item = NSMenuItem(title: preset.name, action: #selector(presetMenuChosen(_:)), keyEquivalent: i < 9 ? "\(i + 1)" : "")
+            item.target = self
+            item.representedObject = preset.id
+            item.state = preset.id == settings.currentPreset ? .on : .off
+            presetsMenu.addItem(item)
+        }
+        presetsMenu.addItem(.separator())
+        presetsMenu.addItem(withTitle: "New Preset", action: #selector(newPresetMenu), keyEquivalent: "n").target = self
+        presetsMenu.addItem(withTitle: "Duplicate Preset", action: #selector(duplicatePresetMenu), keyEquivalent: "").target = self
+        presetsMenu.addItem(withTitle: "Rename Preset…", action: #selector(renamePresetMenu), keyEquivalent: "").target = self
+        presetsMenu.addItem(withTitle: "Delete Preset", action: #selector(deletePresetMenu), keyEquivalent: "").target = self
+    }
+
+    @objc fileprivate func presetMenuChosen(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? UUID { selectPreset(id) }
+    }
+    @objc fileprivate func newPresetMenu() { addPreset() }
+    @objc fileprivate func duplicatePresetMenu() { if let id = settings.currentPreset { addPreset(duplicating: id) } }
+    @objc fileprivate func renamePresetMenu() {
+        if !windowOpen { showMainWindow() }
+        if let id = settings.currentPreset { controls.beginRenamingPreset(id) }
+    }
+    @objc fileprivate func deletePresetMenu() { if let id = settings.currentPreset { deletePreset(id) } }
 }
