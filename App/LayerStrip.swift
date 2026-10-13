@@ -2,7 +2,7 @@ import AppKit
 
 /// A circular button over a picture: a Liquid Glass circle (clear glass, as
 /// over video) on macOS 26, a dark translucent circle before that. The glyph
-/// is white; a toggle that is on tints the glass with the accent colour.
+/// is white; a toggle that is on turns the glass light with a dark glyph.
 final class OverlayButton: NSView {
     static let size: CGFloat = 28
     /// Toggles show their state; plain buttons leave it off.
@@ -65,18 +65,20 @@ final class OverlayButton: NSView {
     }
 
     private func updateLook() {
-        // White glyphs read on video; a soft shadow keeps them legible over white clothing.
+        // Off: clear glass with a white glyph, which reads on video. On: light
+        // glass with a dark glyph, so the state shows without a colour.
+        let glyph: NSColor = isOn ? .black : .white
         button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
-            .applying(.init(paletteColors: [.white]))
+            .applying(.init(paletteColors: [glyph]))
         if let text {
-            let shadow = NSShadow(); shadow.shadowColor = .black.withAlphaComponent(0.5); shadow.shadowBlurRadius = 2
+            let shadow = NSShadow(); shadow.shadowColor = .black.withAlphaComponent(isOn ? 0 : 0.5); shadow.shadowBlurRadius = 2
             button.attributedTitle = NSAttributedString(string: text, attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .heavy), .foregroundColor: NSColor.white, .shadow: shadow])
+                .font: NSFont.systemFont(ofSize: 10, weight: .heavy), .foregroundColor: glyph, .shadow: shadow])
         }
         if #available(macOS 26.0, *), let g = glass as? NSGlassEffectView {
-            g.tintColor = isOn ? .controlAccentColor : NSColor.black.withAlphaComponent(0.25)
+            g.tintColor = isOn ? NSColor.white.withAlphaComponent(0.85) : NSColor.black.withAlphaComponent(0.25)
         } else {
-            layer?.backgroundColor = (isOn ? NSColor.controlAccentColor : NSColor.black.withAlphaComponent(0.5)).cgColor
+            layer?.backgroundColor = (isOn ? NSColor.white.withAlphaComponent(0.9) : NSColor.black.withAlphaComponent(0.5)).cgColor
         }
         button.setAccessibilityValue(isOn ? "on" : "off")
     }
