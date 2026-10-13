@@ -48,8 +48,21 @@ final class FaceTracker {
 
     private let queue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).vision", qos: .userInitiated)
     private let handler = VNSequenceRequestHandler()
+    // One request object each, reused: making a request per frame had Vision
+    // re-resolving its model paths (environment lookups, string hashing) every time.
+    private let detector = VNDetectFaceRectanglesRequest()
+    private let landmarker = VNDetectFaceLandmarksRequest()
     private let lock = NSLock()
     private var busy = false
+    /// Landmarks (eyes, contours, nose, mouth) cost a Neural Engine pass per
+    /// tracked frame. Only web page layers and the preview overlay use them;
+    /// the shadow and the relight need the box and pose, which the detector
+    /// gives on its own every few frames. Off, the tracker runs the detector
+    /// alone and skips the frames in between entirely.
+    var needsLandmarks = false {
+        didSet { lock.lock(); needsLandmarksNow = needsLandmarks; lock.unlock() }
+    }
+    private var needsLandmarksNow = false
     private var lastDetection: VNFaceObservation?
     private var framesSinceDetection = 0
     /// Detect every N tracking frames; landmarks fit to the last box in between.
@@ -65,6 +78,7 @@ final class FaceTracker {
         guard isEnabled else { return }
         lock.lock()
         let skip = busy
+        let landmarks = needsLandmarksNow
         if !skip { busy = true }
         lock.unlock()
         guard !skip else { return }
@@ -73,30 +87,33 @@ final class FaceTracker {
             defer { lock.lock(); busy = false; lock.unlock() }
             // The detector (box + roll/yaw/pitch) is the expensive Neural Engine
             // pass; run it every few frames or when there is no face to follow.
-            // Landmarks fit every frame to the most recent box.
             framesSinceDetection += 1
-            if lastDetection == nil || framesSinceDetection >= detectEvery {
-                let pose = VNDetectFaceRectanglesRequest()
-                try? handler.perform([pose], on: pixelBuffer, orientation: .up)
-                lastDetection = (pose.results ?? []).max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }
+            let detect = lastDetection == nil || framesSinceDetection >= detectEvery
+            if detect {
+                try? handler.perform([detector], on: pixelBuffer, orientation: .up)
+                lastDetection = (detector.results ?? []).max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }
                 framesSinceDetection = 0
             }
             var face: VNFaceObservation? = nil
-            if let box = lastDetection {
-                let landmarks = VNDetectFaceLandmarksRequest()
-                landmarks.inputFaceObservations = [box]
-                try? handler.perform([landmarks], on: pixelBuffer, orientation: .up)
-                face = landmarks.results?.first
+            if landmarks, let box = lastDetection {
+                // Landmarks fit every tracked frame to the most recent box.
+                landmarker.inputFaceObservations = [box]
+                try? handler.perform([landmarker], on: pixelBuffer, orientation: .up)
+                face = landmarker.results?.first
                 if face?.landmarks == nil { lastDetection = nil }   // lost it: detect next time
+            } else if !detect {
+                return   // detector-only mode between detections: nothing new to report
             }
             let state = Self.state(from: face, pose: lastDetection, camScale: camScale, camOffset: camOffset)
             DispatchQueue.main.async { self.onUpdate?(state) }
         }
     }
 
+    /// `face` carries landmarks when they were fitted; `pose` is the detector's
+    /// observation, which alone gives the box and the head angles.
     private static func state(from face: VNFaceObservation?, pose: VNFaceObservation?, camScale: SIMD2<Float>, camOffset: SIMD2<Float>) -> FaceState {
         let now = CACurrentMediaTime()
-        guard let face else { return FaceState(t: now, detected: false) }
+        guard let face = face ?? pose else { return FaceState(t: now, detected: false) }
 
         // Vision: normalised, origin bottom-left, camera image. Output: origin top-left, aspect-filled.
         func out(_ p: CGPoint) -> FacePoint {

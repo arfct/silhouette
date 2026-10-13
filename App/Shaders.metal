@@ -523,18 +523,17 @@ fragment float4 downsample(VSOut in [[stage_in]], texture2d<float> src [[texture
 // Small 4:2:0 copy of the whole camera frame for Vision, written as two
 // planes. Vision takes bi-planar input through its CPU path, which is cheap
 // at 640x360; a BGRA input would route through Core Image on the GPU.
-fragment float4 trackLuma(VSOut in [[stage_in]],
-                          texture2d<float> lumaTex [[texture(0)]],
-                          constant KeyParams &P    [[buffer(0)]])
+// The small frame for Vision: the camera converted to RGB in one pass, as
+// BGRA, which Vision reads directly. A planar frame would cost it a
+// pixel-transfer conversion on the CPU for every request.
+fragment float4 trackRGB(VSOut in [[stage_in]],
+                         texture2d<float> lumaTex   [[texture(0)]],
+                         texture2d<float> chromaTex [[texture(1)]],
+                         constant KeyParams &P      [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    return float4(fullRangeLuma(lumaTex.sample(s, in.uv).r, P), 0.0, 0.0, 1.0);
-}
-
-fragment float4 trackChroma(VSOut in [[stage_in]],
-                            texture2d<float> chromaTex [[texture(1)]],
-                            constant KeyParams &P      [[buffer(0)]])
-{
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    return float4(fullRangeChroma(chromaTex.sample(s, in.uv).rg, P), 0.0, 1.0);
+    float y = fullRangeLuma(lumaTex.sample(s, in.uv).r, P);
+    float2 cbcr = fullRangeChroma(chromaTex.sample(s, in.uv).rg, P);
+    float cb = cbcr.x - 0.5, cr = cbcr.y - 0.5;
+    return float4(saturate(float3(y + 1.5748 * cr, y - 0.1873 * cb - 0.4681 * cr, y + 1.8556 * cb)), 1.0);
 }

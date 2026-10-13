@@ -30,7 +30,7 @@ AI background blur guesses where you end and the room begins, so hair flickers a
 LAYERS
 • Background: an image, a looping movie, a solid colour, or a live web page.
 • Foreground: anything on top of you, such as a transparent PNG, a web page with a transparent background, or a colour wash with alpha.
-• Type a URL, a file path, or a hex colour like #1E90FF, or pick from your recent choices.
+• Pick from thumbnails of your recent choices, or add a file, a web address, or a hex colour like #1E90FF.
 
 SHADOW
 Add a soft drop shadow cast by your silhouette, so you sit in the scene instead of floating on it. Set opacity, size, and offset. Turn on Vary with distance and the shadow grows softer as you lean in and sharper as you sit back.
@@ -53,7 +53,7 @@ Your video is processed on your Mac and goes only to the apps you choose. Silhou
 
 Also included: a test pattern and movie-file input for setting up without a camera, a mirrored preview, light and dark appearance, and built-in help.
 
-Requires a physical green or blue backdrop and macOS 14 or later.
+Requires macOS 26 or later. A physical green or blue backdrop gives the best results; Background Removal works without one.
 
 ## Support URL
 
@@ -88,8 +88,8 @@ Silhouette is a chroma keyer that publishes its output as a virtual camera throu
 
 Testing without a green screen:
 1. Launch Silhouette from /Applications. When prompted, allow camera access.
-2. In the Source menu, choose "Sample video", a bundled green screen clip, or "Test pattern". The green is keyed out in the preview.
-3. In Layers, set Background to "Test page" or type a colour such as #1E90FF to see the composite.
+2. Click the Source button and choose "Sample video", a bundled green screen clip, or "Test pattern". The green is keyed out in the preview.
+3. In Layers, click Background and choose "Test page", or add a colour such as #1E90FF with the + beside Colors, to see the composite.
 
 Testing the virtual camera:
 1. On first launch macOS asks to allow the camera extension. Approve it in System Settings > General > Login Items & Extensions > Camera Extensions.

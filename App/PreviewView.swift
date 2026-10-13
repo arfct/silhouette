@@ -80,6 +80,7 @@ final class PreviewView: NSView {
         backdropLayer.backgroundColor = Self.checkerboard
         layer?.addSublayer(backdropLayer)
         imageLayer.contentsGravity = .resizeAspect
+        imageLayer.actions = ["contents": NSNull()]   // a new frame is never an animation
         imageLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         imageLayer.transform = CATransform3DMakeScale(-1, 1, 1)
         layer?.addSublayer(imageLayer)
@@ -144,6 +145,9 @@ final class PreviewView: NSView {
 
     var onDrop: ((URL) -> Void)?
 
+    /// Show a finished frame. Zero copy: the layer takes the IOSurface the
+    /// renderer wrote. Called from the renderer's completion thread inside its
+    /// own transaction, so no frame ever waits on the main thread.
     func display(surface: IOSurfaceRef?) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)

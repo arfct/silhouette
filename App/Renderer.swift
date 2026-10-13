@@ -118,9 +118,10 @@ final class Renderer {
     private var matteIndex = 0
 
     // Vision input: a small 4:2:0 copy rendered on the GPU.
-    private let trackLumaPipeline: MTLRenderPipelineState
-    private let trackChromaPipeline: MTLRenderPipelineState
+    private let trackPipeline: MTLRenderPipelineState
     private let trackingPool: CVPixelBufferPool
+    /// Textures over the IOSurfaces of camera, output, and tracking buffers.
+    private let surfaces: SurfaceTextures
     static let trackingSize = (w: 640, h: 360)
     /// When set, every other frame also produces a 640x360 BGRA buffer for face tracking.
     var trackingEnabled = false
@@ -217,7 +218,6 @@ final class Renderer {
     /// Extra room around the shadow matte on each side, as a fraction of the frame,
     /// so blur and offset can run past the frame edge.
     private static let shadowPadFraction: Float = 0.25
-    private var textureCache: CVMetalTextureCache?
     private let outputPool: CVPixelBufferPool
     private let dummyBackground: MTLTexture
 
@@ -304,16 +304,11 @@ final class Renderer {
 
         let tl = MTLRenderPipelineDescriptor()
         tl.vertexFunction = desc.vertexFunction
-        tl.fragmentFunction = library.makeFunction(name: "trackLuma")
-        tl.colorAttachments[0].pixelFormat = .r8Unorm
-        trackLumaPipeline = try! device.makeRenderPipelineState(descriptor: tl)
-        let tc = MTLRenderPipelineDescriptor()
-        tc.vertexFunction = desc.vertexFunction
-        tc.fragmentFunction = library.makeFunction(name: "trackChroma")
-        tc.colorAttachments[0].pixelFormat = .rg8Unorm
-        trackChromaPipeline = try! device.makeRenderPipelineState(descriptor: tc)
+        tl.fragmentFunction = library.makeFunction(name: "trackRGB")
+        tl.colorAttachments[0].pixelFormat = .bgra8Unorm
+        trackPipeline = try! device.makeRenderPipelineState(descriptor: tl)
         let trackAttrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey: Self.trackingSize.w,
             kCVPixelBufferHeightKey: Self.trackingSize.h,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
@@ -323,7 +318,7 @@ final class Renderer {
         CVPixelBufferPoolCreate(kCFAllocatorDefault, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, trackAttrs as CFDictionary, &tpool)
         trackingPool = tpool!
 
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
+        surfaces = SurfaceTextures(device: device)
 
         let poolAttrs: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
@@ -465,19 +460,21 @@ final class Renderer {
     // MARK: Rendering
 
     func render(_ camera: CVPixelBuffer) {
-        guard CVPixelBufferGetPlaneCount(camera) == 2, let cache = textureCache else { return }
+        guard CVPixelBufferGetPlaneCount(camera) == 2 else { return }
         let camW = CVPixelBufferGetWidthOfPlane(camera, 0)
         let camH = CVPixelBufferGetHeightOfPlane(camera, 0)
         let chromaW = CVPixelBufferGetWidthOfPlane(camera, 1)
         let chromaH = CVPixelBufferGetHeightOfPlane(camera, 1)
 
-        guard let luma = Self.texture(cache, camera, plane: 0, format: .r8Unorm, width: camW, height: camH),
-              let chroma = Self.texture(cache, camera, plane: 1, format: .rg8Unorm, width: chromaW, height: chromaH) else { return }
+        guard let lumaTexture = surfaces.texture(camera, plane: 0, format: .r8Unorm, width: camW, height: camH),
+              let chromaTexture = surfaces.texture(camera, plane: 1, format: .rg8Unorm, width: chromaW, height: chromaH) else { return }
+        let luma = (texture: lumaTexture, cv: camera), chroma = (texture: chromaTexture, cv: camera)
 
         var outBuffer: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, outputPool, &outBuffer)
         guard let outBuffer,
-              let out = Self.texture(cache, outBuffer, plane: 0, format: .bgra8Unorm, width: outputWidth, height: outputHeight) else { return }
+              let outTexture = surfaces.texture(outBuffer, plane: 0, format: .bgra8Unorm, width: outputWidth, height: outputHeight) else { return }
+        let out = (texture: outTexture, cv: outBuffer)
 
         var (camScale, camOffset) = Self.fill(sourceAspect: Float(camW) / Float(camH),
                                               destAspect: Float(outputWidth) / Float(outputHeight))
@@ -531,13 +528,22 @@ final class Renderer {
         }
 
         // Person matte: segment this very frame before compositing it, so the
-        // matte never lags the image. A few milliseconds on the Neural Engine.
+        // matte never lags the image. Vision gets the small BGRA frame, made
+        // first in its own command buffer (a fraction of a millisecond on the
+        // GPU), not the full camera frame it would otherwise convert on the CPU.
         var maskTexture: MTLTexture = dummyBackground
         var maskKeepAlive: Any? = nil
+        var small: CVPixelBuffer? = nil
         lock.lock(); let usePerson = matte == .person; let auto = temperatureAuto && p.colorEnabled > 0.5; lock.unlock()
         if auto { p.temperature = autoTemperature }
         if p.colorEnabled < 0.5 { p.temperature = 0 }
-        if usePerson, p.bypass < 0.5, let mask = personMatter.mask(for: camera) {
+        if usePerson, p.bypass < 0.5, let pre = commandQueue.makeCommandBuffer(),
+           let frame = encodeTrackingFrame(pre, luma: luma.texture, chroma: chroma.texture, params: &p) {
+            pre.commit()
+            pre.waitUntilCompleted()
+            small = frame
+        }
+        if usePerson, p.bypass < 0.5, let small, let mask = personMatter.mask(for: small) {
             maskTexture = mask.texture
             maskKeepAlive = mask.keepAlive
             p.personMode = 1
@@ -559,10 +565,11 @@ final class Renderer {
         }
 
         // Previous frame's luma for motion detection in the temporal blend.
-        var prevLuma: (texture: MTLTexture, cv: CVMetalTexture)? = nil
+        var prevLuma: (texture: MTLTexture, cv: CVPixelBuffer)? = nil
         if let previousCamera, p.temporal > 0,
-           CVPixelBufferGetWidthOfPlane(previousCamera, 0) == camW, CVPixelBufferGetHeightOfPlane(previousCamera, 0) == camH {
-            prevLuma = Self.texture(cache, previousCamera, plane: 0, format: .r8Unorm, width: camW, height: camH)
+           CVPixelBufferGetWidthOfPlane(previousCamera, 0) == camW, CVPixelBufferGetHeightOfPlane(previousCamera, 0) == camH,
+           let t = surfaces.texture(previousCamera, plane: 0, format: .r8Unorm, width: camW, height: camH) {
+            prevLuma = (t, previousCamera)
         }
         if prevLuma == nil { p.temporal = 0 }
 
@@ -721,35 +728,15 @@ final class Renderer {
             }
         }
 
-        // Small frame for face tracking, every frame or every other one.
+        // Small frame for face tracking, on the tracker's cadence. In person
+        // mode this frame's small picture already exists.
         frameIndex &+= 1
         var trackingBuffer: CVPixelBuffer?
-        var trackingTex: [CVMetalTexture] = []
         if trackingEnabled && frameIndex % max(trackingDivisor, 1) == 0 {
-            var tb: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, trackingPool, &tb)
-            if let tb,
-               let ty = Self.texture(cache, tb, plane: 0, format: .r8Unorm, width: Self.trackingSize.w, height: Self.trackingSize.h),
-               let tcc = Self.texture(cache, tb, plane: 1, format: .rg8Unorm, width: Self.trackingSize.w / 2, height: Self.trackingSize.h / 2) {
-                for (target, pipelineState) in [(ty.texture, trackLumaPipeline), (tcc.texture, trackChromaPipeline)] {
-                    let tp = MTLRenderPassDescriptor()
-                    tp.colorAttachments[0].texture = target
-                    tp.colorAttachments[0].loadAction = .dontCare
-                    tp.colorAttachments[0].storeAction = .store
-                    guard let tenc = cmd.makeRenderCommandEncoder(descriptor: tp) else { continue }
-                    tenc.setRenderPipelineState(pipelineState)
-                    tenc.setFragmentTexture(luma.texture, index: 0)
-                    tenc.setFragmentTexture(chroma.texture, index: 1)
-                    tenc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
-                    tenc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-                    tenc.endEncoding()
-                }
-                trackingBuffer = tb
-                trackingTex = [ty.cv, tcc.cv]
-            }
+            trackingBuffer = small ?? encodeTrackingFrame(cmd, luma: luma.texture, chroma: chroma.texture, params: &p)
         }
 
-        let keepAlive: [Any] = [luma.cv, chroma.cv, out.cv] + (prevLuma.map { [$0.cv] } ?? []) + trackingTex + (maskKeepAlive.map { [$0] } ?? [])
+        let keepAlive: [Any] = [camera, outBuffer] + (prevLuma.map { [$0.cv] } ?? []) + (trackingBuffer.map { [$0] } ?? []) + (small.map { [$0] } ?? []) + (maskKeepAlive.map { [$0] } ?? [])
         cmd.addCompletedHandler { [weak self] buffer in
             withExtendedLifetime(keepAlive) {}
             guard let self else { return }
@@ -760,6 +747,25 @@ final class Renderer {
             recordStats(buffer)
         }
         cmd.commit()
+    }
+
+    /// Render the camera into a 640×360 BGRA buffer from the tracking pool.
+    private func encodeTrackingFrame(_ cmd: MTLCommandBuffer, luma: MTLTexture, chroma: MTLTexture, params p: inout KeyParams) -> CVPixelBuffer? {
+        var tb: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, trackingPool, &tb)
+        guard let tb, let target = surfaces.texture(tb, plane: 0, format: .bgra8Unorm, width: Self.trackingSize.w, height: Self.trackingSize.h) else { return nil }
+        let tp = MTLRenderPassDescriptor()
+        tp.colorAttachments[0].texture = target
+        tp.colorAttachments[0].loadAction = .dontCare
+        tp.colorAttachments[0].storeAction = .store
+        guard let tenc = cmd.makeRenderCommandEncoder(descriptor: tp) else { return nil }
+        tenc.setRenderPipelineState(trackPipeline)
+        tenc.setFragmentTexture(luma, index: 0)
+        tenc.setFragmentTexture(chroma, index: 1)
+        tenc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
+        tenc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        tenc.endEncoding()
+        return tb
     }
 
     /// Head geometry for the relight, from the face tracker: an ellipse a little
@@ -944,15 +950,6 @@ final class Renderer {
 
     // MARK: Helpers
 
-    private static func texture(_ cache: CVMetalTextureCache, _ buffer: CVPixelBuffer, plane: Int,
-                                format: MTLPixelFormat, width: Int, height: Int) -> (texture: MTLTexture, cv: CVMetalTexture)? {
-        var cv: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, buffer, nil,
-                                                               format, width, height, plane, &cv)
-        guard status == kCVReturnSuccess, let cv, let tex = CVMetalTextureGetTexture(cv) else { return nil }
-        return (tex, cv)
-    }
-
     /// Scale/offset mapping destination uv to source uv so the source covers
     /// the destination (aspect fill, centred).
     static func fill(sourceAspect: Float, destAspect: Float) -> (SIMD2<Float>, SIMD2<Float>) {
@@ -963,5 +960,41 @@ final class Renderer {
             let s = sourceAspect / destAspect
             return (SIMD2(1, s), SIMD2(0, (1 - s) / 2))
         }
+    }
+}
+
+/// Metal textures over pixel buffers' IOSurfaces, cached by surface. Pools
+/// recycle the same few surfaces, so after the first frames every lookup is
+/// a dictionary hit instead of a CVMetalTextureCache call, which costs about
+/// a tenth of a millisecond each and runs several times per frame.
+///
+/// Each texture retains its surface, so a surface's ID cannot be reused while
+/// its texture is cached. Entries unused for a while are dropped, so a source
+/// change does not keep a stale pool alive. Used from the render thread only.
+final class SurfaceTextures {
+    private struct Key: Hashable { let id: IOSurfaceID; let plane: Int; let format: MTLPixelFormat }
+    private var entries: [Key: (texture: MTLTexture, surface: IOSurfaceRef, lastUse: UInt64)] = [:]
+    private var tick: UInt64 = 0
+    private let device: MTLDevice
+
+    init(device: MTLDevice) { self.device = device }
+
+    func texture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat, width: Int, height: Int) -> MTLTexture? {
+        guard let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return nil }
+        tick &+= 1
+        let key = Key(id: IOSurfaceGetID(surface), plane: plane, format: format)
+        if let hit = entries[key], hit.surface === surface {
+            entries[key]!.lastUse = tick
+            return hit.texture
+        }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: width, height: height, mipmapped: false)
+        d.usage = [.shaderRead, .renderTarget]
+        d.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: d, iosurface: surface, plane: plane) else { return nil }
+        entries[key] = (texture, surface, tick)
+        if tick % 256 == 0 {   // drop what has not been used for roughly the last two seconds
+            entries = entries.filter { tick &- $0.value.lastUse < 600 }
+        }
+        return texture
     }
 }

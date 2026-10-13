@@ -14,17 +14,21 @@ final class RangeSlider: NSControl {
     /// below `lower` and fading to opaque at `upper`: the key's effect, drawn.
     var colorAt: ((Float) -> NSColor)? { didSet { needsDisplay = true } }
 
+    /// Track height: a mini switch's, so the swatch and Auto beside it line up.
+    static let trackHeight: CGFloat = 18
     private let knobRadius: CGFloat = 7
+    /// Thumb centres stay this far from the ends, inside the capsule.
+    private var inset: CGFloat { Self.trackHeight / 2 }
     private var activeThumb = 0
 
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 20) }
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: Self.trackHeight) }
 
     private func x(for v: Float) -> CGFloat {
         let t = min(max((v - minValue) / (maxValue - minValue), 0), 1)   // typed values may sit outside the track
-        return knobRadius + CGFloat(t) * (bounds.width - 2 * knobRadius)
+        return inset + CGFloat(t) * (bounds.width - 2 * inset)
     }
     private func value(forX x: CGFloat) -> Float {
-        let t = Float((x - knobRadius) / max(bounds.width - 2 * knobRadius, 1))
+        let t = Float((x - inset) / max(bounds.width - 2 * inset, 1))
         return min(max(minValue + t * (maxValue - minValue), minValue), maxValue)
     }
 
@@ -33,7 +37,7 @@ final class RangeSlider: NSControl {
         if let colorAt {
             drawColorTrack(colorAt, midY: midY)
         } else {
-            let track = NSRect(x: knobRadius, y: midY - 2, width: bounds.width - 2 * knobRadius, height: 4)
+            let track = NSRect(x: 0, y: midY - 2, width: bounds.width, height: 4)
             NSColor.tertiaryLabelColor.withAlphaComponent(0.35).setFill()
             NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
             let selected = NSRect(x: x(for: lower), y: midY - 2, width: max(x(for: upper) - x(for: lower), 0), height: 4)
@@ -55,9 +59,10 @@ final class RangeSlider: NSControl {
     /// A strip of the colours at each distance from the key: the key colour at
     /// the left, through neutral, toward its complement on the right.
     private func drawColorTrack(_ colorAt: (Float) -> NSColor, midY: CGFloat) {
-        let h: CGFloat = 10
-        let track = NSRect(x: knobRadius, y: midY - h / 2, width: bounds.width - 2 * knobRadius, height: h)
-        let clip = NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3)
+        let h = Self.trackHeight - 1
+        // Full width, as tall as a switch, with fully rounded ends; the thumbs sit inside it.
+        let track = NSRect(x: 0.5, y: midY - h / 2, width: bounds.width - 1, height: h)
+        let clip = NSBezierPath(roundedRect: track, xRadius: h / 2, yRadius: h / 2)
         NSGraphicsContext.saveGraphicsState()
         clip.addClip()
         let step: CGFloat = 0.5
@@ -204,7 +209,7 @@ final class ControlCell: NSView {
 
 // MARK: - Controls sidebar
 
-final class ControlsView: NSView, NSComboBoxDelegate {
+final class ControlsView: NSView {
     static let width: CGFloat = 316
     static let testPageTitle = "Test page"
     static let noneTitle = "None"
@@ -219,10 +224,11 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onTrackFace: ((Bool) -> Void)?
     var onShadowFollowsFace: ((Bool) -> Void)?
     var onMirrorPreview: ((Bool) -> Void)?
-    var onChromakeyOpen: ((Bool) -> Void)?
     var onFaceOverlay: ((Bool) -> Void)?
     /// 0 = chroma key, 1 = person segmentation.
     var onMatteSource: ((Int) -> Void)?
+    /// Apple Chromakey was chosen: explain the Video Effects setup.
+    var onAppleChromakey: (() -> Void)?
     var onTemperatureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
@@ -240,21 +246,38 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     var onPickKey: (() -> Void)?
     var onAutoKey: (() -> Void)?
 
-    let urlField = NSComboBox(frame: .zero)
-    let fgField = NSComboBox(frame: .zero)
+    /// Option buttons drawn over the tiles.
+    private let supersampleButton = OverlayButton(text: "HD", tip: "HD keys at 1080p. 4K captures and keys at 3840×2160 when the camera supports it, then downsamples to the 1080p output: finer hair and edges, about four times the GPU work.")
+    private let mirrorButton = OverlayButton(symbol: "arrow.left.and.right.righttriangle.left.righttriangle.right", tip: "Mirror the preview like a mirror. The sources, the layers, and the virtual camera output are never mirrored.")
+    private let freezeButton = OverlayButton(symbol: "pause.fill", tip: "Freeze frame")
+    private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
+    private let fgBlendButton = OverlayButton(symbol: "camera.filters", tip: "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top.")
+    private var fgBlendValue = 0
+    /// Background, Source, and Foreground, shown above the preview rather than in the sidebar.
+    private(set) var sourceTile: LayerTile!
+    private(set) var backgroundTile: LayerTile!
+    private(set) var foregroundTile: LayerTile!
+    /// The row of three tiles; the window places it above the preview.
+    let layerStrip = NSStackView()
+    /// Mirror and Pause, which the window places on the preview's bottom-right corner.
+    let previewButtons = NSStackView()
+    private let picker = PickerPopover()
+    private enum PickerTarget { case source, layer(LayerSlot) }
+    private var pickerTarget: PickerTarget?
     private var recentURLs: [String] = []
-    /// The list shows the end of long entries; this maps what it shows back to the value.
-    private var displayToValue: [String: String] = [:]
-
-    private let cameraPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let supersampleSwitch = NSSwitch()
+    private var layerValues: [LayerSlot: String] = [.background: ControlsView.noneTitle, .foreground: ControlsView.noneTitle]
+    private var sourceSelection: String?
+    /// The live camera frame, for the current camera's tile.
+    var currentFrameImage: (() -> NSImage?)?
+    /// The current web page of a layer, for its tile.
+    var layerSnapshot: ((LayerSlot) -> NSImage?)?
+    /// Forget a layer recent (URL, path, or colour), or a recent movie source by path.
+    var onRemoveRecent: ((String) -> Void)?
+    var onRemoveVideo: ((String) -> Void)?
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
-    private let freezeButton = NSButton(title: "", target: nil, action: nil)
     private let temperatureAutoSwitch = NSButton()
     private let colorSwitch = NSSwitch()
-    private let fgMaskSwitch = NSSwitch()
-    private let fgBlendPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     /// Foreground blend modes, in the shader's order; Normal is 0.
     static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
     private var colorBody: NSView!
@@ -267,14 +290,12 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private var shadowBody: NSView!
     private var shadowGroup: NSView!
     private let keySwitch = NSSwitch()
-    private var keyTools: NSStackView!
-    private let matteControl = NSSegmentedControl(labels: ["Green screen", "Person", "Apple"], trackingMode: .selectOne, target: nil, action: nil)
+    /// The Chromakey section's title, as a pull-down: Chromakey, Background Removal, Apple Chromakey…
+    private let matteMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    private var keyRangeRow: NSView!
     /// Apple mode: open Video Effects, save the green image, and a status line.
-    private var systemRow: NSStackView!
-    private let systemStatus = NSTextField(wrappingLabelWithString: "")
     var onOpenVideoEffects: (() -> Void)?
     var onSaveGreenImage: (() -> Void)?
-    private let mirrorSwitch = NSSwitch()
     private let sinkDot = StatusDot()
     private var sinkGroup: NSView!
     private var showSinkDetail = false
@@ -283,7 +304,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let connectedDot = StatusDot()
     private var chromaBody: NSView!
     private var connectedRow: NSStackView!
-    private let chromaDisclosure = NSButton(title: "", target: nil, action: nil)
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
@@ -293,10 +313,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     private let offsetPad = OffsetPad()
     /// `scale` and `decimals` turn the stored value into what the field shows (percent, pixels).
     private var cells: [WritableKeyPath<KeyParams, Float>: (slider: NSSlider, cell: ControlCell, range: ClosedRange<Float>, scale: Float, decimals: Int)] = [:]
-    private let keyLow = ValueField(frame: .zero)
-    private let keyHigh = ValueField(frame: .zero)
-    private var keyFieldWidths: [NSLayoutConstraint] = []
-    private var keyRangeCell: ControlCell!
+    private static let keyRangeTip = "Color Range: how close a colour must be to the key colour to be removed, in percent of the full chroma span. The left thumb is fully removed; the right thumb is where the transition to opaque ends. Typical keys sit between 5 and 20."
     private let sinkStatus = NSTextField(labelWithString: "Not connected")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let installButton = NSButton(title: "Install", target: nil, action: nil)
@@ -351,83 +368,71 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         connectedRow.isHidden = true
         self.connectedRow = connectedRow
 
-        // Source: camera, then switch rows.
-        cameraPopup.target = self
-        cameraPopup.action = #selector(cameraChanged)
-        supersampleSwitch.target = self; supersampleSwitch.action = #selector(supersampleChanged)
         trackSwitch.target = self; trackSwitch.action = #selector(trackChanged)
-        cameraPopup.toolTip = "Video source: a camera, a movie file, or the built-in test pattern."
-        mirrorSwitch.target = self; mirrorSwitch.action = #selector(mirrorChanged)
-        let toggles = NSStackView(views: [
-            inlineSwitch("4K", supersampleSwitch, tip: "Capture and key at 3840×2160 when the camera supports it, then downsample to the 1080p output. Finer hair and edges, about four times the GPU work."),
-            inlineSwitch("Mirror", mirrorSwitch, tip: "Mirror the preview of a live camera like a mirror. Movies and the test pattern always show as recorded, and the virtual camera output is never mirrored."),
-        ])
-        toggles.spacing = 14
-        toggles.distribution = .equalSpacing
-        freezeButton.bezelStyle = .accessoryBarAction
-        freezeButton.isBordered = false
-        freezeButton.imagePosition = .imageOnly
-        freezeButton.target = self
-        freezeButton.action = #selector(freezeTapped)
-        frozen = false
-        stack.addArrangedSubview(group("Source", trailing: freezeButton, rows: [cameraPopup, toggles]))
 
-        // Layers: one combo box each for the background (behind the keyed camera)
-        // and the foreground (over it). None, the test page, recent URLs, files and
-        // colours, and Choose File…; or type a URL, a path, or a hex colour.
-        for (field, what) in [(urlField, "behind you"), (fgField, "in front of you")] {
-            field.placeholderString = "URL, file path, or #hex"
-            field.isEditable = true
-            field.completes = false
-            field.numberOfVisibleItems = 13
-            field.target = self
-            field.action = #selector(urlEntered(_:))
-            field.delegate = self
-            field.usesSingleLineMode = true
-            field.lineBreakMode = .byTruncatingHead
-            field.cell?.lineBreakMode = .byTruncatingHead
-            field.stringValue = Self.noneTitle
-            field.toolTip = "What shows \(what): nothing, the bundled test page, a web page URL, an image or movie file, or a hex colour like #1E90FF (8 digits for alpha). Pick from the list or type and press Return."
+        // Background, Source, Foreground: tiles above the preview. Each has a
+        // picker button at its top right and its options at the bottom right.
+        supersampleButton.target = self; supersampleButton.action = #selector(supersampleChanged)
+        mirrorButton.target = self; mirrorButton.action = #selector(mirrorChanged)
+        freezeButton.target = self; freezeButton.action = #selector(freezeTapped)
+        fgMaskButton.target = self; fgMaskButton.action = #selector(fgMaskToggled)
+        fgBlendButton.target = self; fgBlendButton.action = #selector(fgBlendTapped)
+        frozen = false
+        sourceTile = LayerTile(title: "Source", options: [supersampleButton])
+        // Mirror and Pause act on the preview, so they sit on it rather than on the Source tile.
+        for button in [mirrorButton, freezeButton] { previewButtons.addArrangedSubview(button) }
+        previewButtons.spacing = 6
+        previewButtons.translatesAutoresizingMaskIntoConstraints = false
+        backgroundTile = LayerTile(title: "Background", options: [])
+        foregroundTile = LayerTile(title: "Foreground", options: [fgMaskButton, fgBlendButton])
+        sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
+        backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
+        foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
+        for tile in [backgroundTile!, sourceTile!, foregroundTile!] {   // back to front, as they stack in the output
+            layerStrip.addArrangedSubview(tile.column)
+            // Exactly a third of the row, so nothing (a long caption, the fill-height rule) can widen a tile.
+            tile.column.widthAnchor.constraint(equalTo: layerStrip.widthAnchor, multiplier: 1.0 / 3.0, constant: -20.0 / 3.0).isActive = true
         }
-        rebuildURLItems()
-        fgMaskSwitch.target = self; fgMaskSwitch.action = #selector(fgMaskToggled)
-        fgBlendPopup.addItems(withTitles: Self.blendModes)
-        fgBlendPopup.controlSize = .small
-        fgBlendPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        fgBlendPopup.target = self; fgBlendPopup.action = #selector(fgBlendModeChanged)
-        fgBlendPopup.toolTip = "How the foreground combines with what is under it, as in an image editor. Normal lays it on top."
-        fgBlendPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let blendLabel = NSTextField(labelWithString: "Blend")
-        blendLabel.font = .systemFont(ofSize: 12)
-        blendLabel.toolTip = fgBlendPopup.toolTip
-        let blendRow = NSStackView(views: [blendLabel, fgBlendPopup]); blendRow.spacing = 5
-        blendRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let fgOptions = NSStackView(views: [
-            inlineSwitch("Mask", fgMaskSwitch, tip: "Confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything."),
-            blendRow,
-        ])
-        fgOptions.spacing = 12
-        fgOptions.distribution = .fill
-        stack.addArrangedSubview(group("Layers", trailing: nil, rows: [labeled("Background", urlField), labeled("Foreground", fgField), fgOptions]))
+        layerStrip.orientation = .horizontal
+        layerStrip.distribution = .fillEqually
+        layerStrip.alignment = .top
+        layerStrip.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        layerStrip.setHuggingPriority(NSLayoutConstraint.Priority(800), for: .vertical)   // never stretch to fill height
+        layerStrip.spacing = 10
+        layerStrip.translatesAutoresizingMaskIntoConstraints = false
+        picker.onSelect = { [weak self] value in self?.pickerChose(value) }
+        picker.onRemove = { [weak self] value in self?.pickerRemoved(value) }
+        picker.onAdd = { [weak self] kind, text in self?.pickerAdded(kind, text) }
+        showLayer(.background, Self.noneTitle)
+        showLayer(.foreground, Self.noneTitle)
 
         // Key: swatch, Pick and Auto in the header; range and spill below.
         keySwatch.isBordered = false
         keySwatch.wantsLayer = true
-        keySwatch.layer?.cornerRadius = 4
+        keySwatch.layer?.cornerRadius = RangeSlider.trackHeight / 2   // a capsule, like the track beside it
         keySwatch.layer?.borderWidth = 1
         keySwatch.layer?.borderColor = NSColor.black.withAlphaComponent(0.2).cgColor
         keySwatch.widthAnchor.constraint(equalToConstant: 36).isActive = true   // a mini switch's width
-        keySwatch.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        keySwatch.heightAnchor.constraint(equalToConstant: RangeSlider.trackHeight).isActive = true
         keySwatch.target = self
         keySwatch.action = #selector(pickKeyTapped)
         keySwatch.toolTip = "The backdrop colour being removed. Click to show the unkeyed image, then click the backdrop in the preview. Esc cancels."
-        autoButton.title = "Auto"; autoButton.target = self; autoButton.action = #selector(autoKeyTapped); autoButton.controlSize = .mini
+        // Auto: a small text button the size of the switch above it.
+        autoButton.title = "Auto"
+        autoButton.isBordered = false
+        autoButton.wantsLayer = true
+        autoButton.layer?.cornerRadius = RangeSlider.trackHeight / 2
+        autoButton.font = .systemFont(ofSize: 10, weight: .medium)
+        autoButton.contentTintColor = .labelColor
+        autoButton.target = self; autoButton.action = #selector(autoKeyTapped)
+        autoButton.setContentHuggingPriority(.required, for: .horizontal)
+        autoButton.widthAnchor.constraint(equalToConstant: 36).isActive = true   // the switch's visible size
+        autoButton.heightAnchor.constraint(equalToConstant: RangeSlider.trackHeight).isActive = true
+        updateAutoButtonFill()
         autoButton.toolTip = "Find the backdrop colour and range from the edges of the frame over about a second, avoiding the face and body. Runs by itself when a new source is chosen."
         keySwitch.target = self; keySwitch.action = #selector(keyToggled)
         keySwitch.controlSize = .mini
         keySwitch.toolTip = "Key out the backdrop. Off passes the camera through untouched, so the background and shadow have no effect."
-        let keyTools = NSStackView(views: [keySwatch, autoButton, keySwitch]); keyTools.spacing = 8
-        self.keyTools = keyTools
         keyHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         keyHint.textColor = .secondaryLabelColor
         keyHint.preferredMaxLayoutWidth = Self.width - 48
@@ -436,31 +441,34 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         keyRange.onChange = { [weak self] lo, hi in
             self?.onParam?(\.tolerance, lo); self?.onParam?(\.softness, hi - lo); self?.updateCompositeValues()
         }
-        keyRangeCell = rangeCell("Color Range", keyRange, tip: "How close a colour must be to the key colour to be removed, in percent of the full chroma span. Left value: fully removed. Right value: where the transition to opaque ends. Typical keys sit between 5 and 20; type or arrow past 30 if needed.")
-        // Chromakey: key colour and matte in one collapsible group.
-        matteControl.target = self
-        matteControl.action = #selector(matteChanged)
-        matteControl.selectedSegment = 0
-        matteControl.segmentDistribution = .fillEqually
-        matteControl.controlSize = .small
-        matteControl.toolTip = "Green screen keys a real backdrop by colour. Person finds you with on-device segmentation and needs no backdrop. Apple uses the Mac's own Background effect with a flat green image, then keys that green: the best edges without a backdrop, on cameras that support it."
-        let effectsButton = NSButton(title: "Video Effects…", target: self, action: #selector(openVideoEffectsTapped)); effectsButton.controlSize = .small
-        effectsButton.toolTip = "Open the system Video Effects panel. Turn on Background, then choose the green image as a custom background."
-        let greenButton = NSButton(title: "Save Green Image…", target: self, action: #selector(saveGreenTapped)); greenButton.controlSize = .small
-        greenButton.toolTip = "Save a plain green 1920×1080 image to use as the custom background in Video Effects."
-        let systemButtons = NSStackView(views: [effectsButton, greenButton]); systemButtons.spacing = 8
-        systemStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        systemStatus.textColor = .secondaryLabelColor
-        systemStatus.preferredMaxLayoutWidth = Self.width - 48
-        systemRow = NSStackView(views: [systemButtons, systemStatus])
-        systemRow.orientation = .vertical
-        systemRow.alignment = .leading
-        systemRow.spacing = 6
-        systemRow.isHidden = true
+        keyRange.setAccessibilityElement(true)
+        keyRange.setAccessibilityRole(.slider)
+        keyRange.setAccessibilityLabel("Color Range")
+        // Chromakey: the title is a pull-down for the matte, the swatch sits at
+        // its left, Auto sits beside the Color Range.
+        matteMenu.pullsDown = true
+        matteMenu.isBordered = false
+        matteMenu.addItem(withTitle: "")   // the pull-down's title, set in matteSource
+        for (title, tag) in [("Chromakey", 0), ("Background Removal", 1)] {
+            matteMenu.addItem(withTitle: title)
+            matteMenu.lastItem?.tag = tag
+            matteMenu.lastItem?.target = self
+            matteMenu.lastItem?.action = #selector(matteChosen(_:))
+        }
+        matteMenu.menu?.addItem(.separator())
+        matteMenu.addItem(withTitle: "Apple Chromakey…")
+        matteMenu.lastItem?.target = self
+        matteMenu.lastItem?.action = #selector(appleChromakeyChosen)
+        matteMenu.lastItem?.toolTip = "Use the Mac's own Background effect with a plain green image, then key that green: the best edges without a backdrop, on cameras that support it."
+        matteMenu.toolTip = "Chromakey removes a real backdrop by colour. Background Removal finds you with on-device segmentation and needs no backdrop. Apple Chromakey sets up the Mac's Background effect with a green image to key."
+        matteMenu.setContentHuggingPriority(.required, for: .horizontal)
+        let keyRangeRow = NSStackView(views: [keySwatch, keyRange, autoButton])
+        keyRangeRow.spacing = 8
+        keyRangeRow.alignment = .centerY
+        keyRange.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        self.keyRangeRow = keyRangeRow
         let body = NSStackView(views: [
-            matteControl,
-            systemRow,
-            keyRangeCell,
+            keyRangeRow,
             columns([sliderCell("Shrink", \.edge, 0...4, decimals: 1, tip: "Pulls the matte edge in by this many pixels (at 1920×1080) to trim fringes. The same value means the same amount on a 720p or 4K source."),
                      sliderCell("Blur", \.feather, 0...4, decimals: 1, tip: "Softens the matte edge, in pixels at 1920×1080.")]),
             columns([sliderCell("Desaturate", \.spill, 0...1, scale: 100, decimals: 0, tip: "Removes the backdrop's tint reflected onto hair and clothing, in percent."),
@@ -471,12 +479,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         body.spacing = 8
         for v in body.arrangedSubviews { v.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         chromaBody = body
-        chromaDisclosure.bezelStyle = .disclosure
-        chromaDisclosure.setButtonType(.pushOnPushOff)
-        chromaDisclosure.target = self
-        chromaDisclosure.action = #selector(chromaToggled)
-        chromaDisclosure.toolTip = "Show or hide the chromakey controls"
-        stack.addArrangedSubview(group("Chromakey", leading: chromaDisclosure, trailing: keyTools, rows: [body, keyHint]))   // hint stays visible when collapsed
+        stack.addArrangedSubview(group("Chromakey", titleView: matteMenu, trailing: keySwitch, rows: [body, keyHint]))
+        matteSource = 0
 
         // Colour: corrections applied to the keyed camera image only, after the matte.
         colorSwitch.target = self; colorSwitch.action = #selector(colorToggled)
@@ -508,8 +512,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         colorStack.spacing = 8
         for v in colorStack.arrangedSubviews { v.widthAnchor.constraint(equalTo: colorStack.widthAnchor).isActive = true }
         colorBody = colorStack
-        stack.addArrangedSubview(group("Color", trailing: colorSwitch, rows: [colorStack], tip: "Colour corrections applied to your image after keying, so it sits in the background."))
-        chromakeyOpen = false
+        stack.addArrangedSubview(group("Lighting", trailing: colorSwitch, rows: [colorStack], tip: "Lighting and colour corrections applied to your image after keying, so it sits in the background."))
 
         // Shadow: distance switch in the header; opacity and blur beside the pad.
         offsetPad.onChange = { [weak self] v in
@@ -574,7 +577,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         highRateLabel.toolTip = highRateSwitch.toolTip
         highRateLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         highRateRow = NSStackView(views: [highRateLabel, highRateSwitch]); (highRateRow as! NSStackView).spacing = 6
-        stack.addArrangedSubview(group("Face tracking", trailing: trackSwitch, rows: [overlayRow, highRateRow], tip: trackSwitch.toolTip))
+        stack.addArrangedSubview(group("Face tracking", trailing: trackSwitch, rows: [highRateRow, overlayRow], tip: trackSwitch.toolTip))
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -618,11 +621,22 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     /// Settings-style group: an inset box with a header row (title left,
     /// optional trailing view right) and a vertical list of rows.
-    private func group(_ title: String, leading: NSView? = nil, trailing: NSView?, rows: [NSView], tip: String? = nil) -> NSView {
-        let header = NSTextField(labelWithString: title.uppercased())
-        header.toolTip = tip
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
-        header.textColor = .secondaryLabelColor
+    private func group(_ title: String, leading: NSView? = nil, titleView: NSView? = nil, trailing: NSView?, rows: [NSView], tip: String? = nil) -> NSView {
+        let label = NSTextField(labelWithString: title.uppercased())
+        label.toolTip = tip
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        let header: NSView
+        if let titleView {
+            // A custom title (the Chromakey pull-down) hugs its text; a spacer stretches instead.
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+            let titled = NSStackView(views: [titleView, spacer])
+            titled.spacing = 0
+            header = titled
+        } else {
+            header = label
+        }
         // The title stretches; whatever sits on the trailing edge stays right-aligned.
         header.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         trailing?.setContentHuggingPriority(.required, for: .horizontal)
@@ -650,17 +664,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         return box
     }
 
-    /// Label and compact switch side by side, for several on one line.
-    private func inlineSwitch(_ title: String, _ toggle: NSSwitch, tip: String) -> NSView {
-        toggle.controlSize = .mini
-        toggle.toolTip = tip
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12)
-        label.toolTip = tip
-        let row = NSStackView(views: [label, toggle])
-        row.spacing = 5
-        return row
-    }
 
     /// A list row: label on the left, a compact switch on the right.
     private func switchRow(_ title: String, _ toggle: NSSwitch, tip: String) -> NSView {
@@ -726,39 +729,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         String(format: "%.\(decimals)f", v * scale)
     }
 
-    /// Two fields, low and high, in percent of the chroma span (stored value × 100).
-    /// Typed or stepped values may go past the slider's track.
-    private func rangeCell(_ title: String, _ slider: RangeSlider, tip: String) -> ControlCell {
-        let dash = NSTextField(labelWithString: "–")
-        dash.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        dash.textColor = .secondaryLabelColor
-        for field in [keyLow, keyHigh] {   // sized to their text; see updateCompositeValues
-            let w = field.widthAnchor.constraint(equalToConstant: 14)
-            w.isActive = true
-            keyFieldWidths.append(w)
-            field.toolTip = tip
-        }
-        keyHigh.alignment = .left   // hugs the dash from the right as the low field does from the left
-        let cell = ControlCell(title: title, control: slider, valueViews: [keyLow, dash, keyHigh])
-        cell.toolTip = tip; cell.label.toolTip = tip; slider.toolTip = tip
-        func apply(lo: Float, hi: Float) {
-            let lo = max(lo, 0), hi = max(hi, lo + slider.minGap)
-            slider.lower = lo; slider.upper = hi
-            slider.onChange?(lo, hi)
-        }
-        keyLow.onCommit = { [weak self] text in
-            if let v = Float(text.trimmingCharacters(in: .whitespaces)) { apply(lo: v / 100, hi: max(slider.upper, v / 100 + slider.minGap)) }
-            self?.updateCompositeValues()
-        }
-        keyHigh.onCommit = { [weak self] text in
-            if let v = Float(text.trimmingCharacters(in: .whitespaces)) { apply(lo: min(slider.lower, v / 100 - slider.minGap), hi: v / 100) }
-            self?.updateCompositeValues()
-        }
-        keyLow.onStep = { d in apply(lo: slider.lower + d / 100, hi: max(slider.upper, slider.lower + d / 100 + slider.minGap)) }
-        keyHigh.onStep = { d in apply(lo: min(slider.lower, slider.upper + d / 100 - slider.minGap), hi: slider.upper + d / 100) }
-        return cell
-    }
-
     private func set(_ keyPath: WritableKeyPath<KeyParams, Float>, _ v: Float) {
         guard let (slider, cell, _, scale, decimals) = cells[keyPath] else { return }
         slider.floatValue = v
@@ -767,11 +737,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     }
 
     private func updateCompositeValues() {
-        keyLow.stringValue = String(format: "%.0f", keyRange.lower * 100)
-        keyHigh.stringValue = String(format: "%.0f", keyRange.upper * 100)
-        for (field, width) in zip([keyLow, keyHigh], keyFieldWidths) {   // editable fields have no intrinsic width
-            width.constant = ceil((field.stringValue as NSString).size(withAttributes: [.font: field.font!]).width) + 6
-        }
+        // No readout above the track any more; the values live in its tooltip.
+        let range = String(format: "%.0f – %.0f", keyRange.lower * 100, keyRange.upper * 100)
+        keyRange.toolTip = "\(range)\n\n" + Self.keyRangeTip
+        keyRange.setAccessibilityValue(range)
         offsetValue.stringValue = String(format: "%+.0f, %+.0f", offsetPad.value.x * 100, offsetPad.value.y * 100)
     }
 
@@ -791,42 +760,48 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         connectedRow?.isHidden = !sinkConnected
     }
 
-    var chromakeyOpen: Bool = false {
-        didSet {
-            chromaBody.isHidden = !chromakeyOpen
-            chromaDisclosure.state = chromakeyOpen ? .on : .off
-        }
-    }
 
     // MARK: State in
 
-    /// Items: devices, separator, Test pattern, Sample video, recent movies, separator, Video file…
+    /// The source choices: cameras and the test pattern, then the sample and recent movies.
     func setDevices(_ devices: [AVCaptureDevice], selected: AVCaptureDevice?, testPattern: Bool = false,
                     sample: Bool = false, videos: [String] = [], selectedVideo: String? = nil) {
         self.devices = devices
         videoPaths = videos
-        cameraPopup.removeAllItems()
-        cameraPopup.addItems(withTitles: devices.map(\.localizedName))
-        cameraPopup.menu?.addItem(.separator())
-        cameraPopup.addItem(withTitle: "Test pattern")
-        cameraPopup.addItem(withTitle: "Sample video")
-        cameraPopup.lastItem?.toolTip = "A short green screen clip bundled with Silhouette, for trying the key without a backdrop."
-        for path in videos {
-            let item = NSMenuItem(title: (path as NSString).lastPathComponent, action: nil, keyEquivalent: "")
-            item.toolTip = path
-            cameraPopup.menu?.addItem(item)
+        if testPattern { sourceSelection = "testpattern" }
+        else if sample { sourceSelection = "sample" }
+        else if let selectedVideo { sourceSelection = "video:" + selectedVideo }
+        else if let selected { sourceSelection = "camera:" + selected.uniqueID }
+        else { sourceSelection = nil }
+        let sections = sourceSections()
+        if let current = sections.flatMap(\.items).first(where: { $0.value == sourceSelection }) {
+            var shown = current
+            if case .image = current.thumbnail { shown.thumbnail = .symbol("web.camera") }   // no stale frame in the sidebar
+            sourceTile.show(shown)
+            scheduleSourceThumbnail()
+        } else {
+            sourceTile.show(PickerItem(value: "", title: "None", thumbnail: .symbol("plus")))
         }
-        cameraPopup.menu?.addItem(.separator())
-        cameraPopup.addItem(withTitle: "Video file…")
-        if testPattern {
-            cameraPopup.selectItem(at: devices.count + 1)
-        } else if sample {
-            cameraPopup.selectItem(at: devices.count + 2)
-        } else if let selectedVideo, let i = videos.firstIndex(of: selectedVideo) {
-            cameraPopup.selectItem(at: devices.count + 3 + i)
-        } else if let selected, let i = devices.firstIndex(where: { $0.uniqueID == selected.uniqueID }) {
-            cameraPopup.selectItem(at: i)
+        if case .source? = pickerTarget { picker.update(sections: sections, selected: sourceSelection) }
+    }
+
+    private func sourceSections() -> [PickerSection] {
+        var cameras: [PickerItem] = devices.map { device in
+            let value = "camera:" + device.uniqueID
+            let live = value == sourceSelection ? currentFrameImage?() : nil
+            return PickerItem(value: value, title: device.localizedName, thumbnail: live.map { .image($0) } ?? .symbol("web.camera"))
         }
+        cameras.append(PickerItem(value: "testpattern", title: "Test pattern", thumbnail: .symbol("rectangle.split.3x3"),
+                                  tooltip: "A moving test pattern, for setting up without a camera."))
+        var videos: [PickerItem] = []
+        if let sample = Bundle.main.url(forResource: "Sample", withExtension: "mp4") {
+            videos.append(PickerItem(value: "sample", title: "Sample video", thumbnail: .file(sample),
+                                     tooltip: "A short green screen clip bundled with Silhouette, for trying the key without a backdrop."))
+        }
+        videos += videoPaths.map {
+            PickerItem(value: "video:" + $0, title: PickerLabel.file($0), thumbnail: .file(URL(fileURLWithPath: $0)), tooltip: $0, removable: true)
+        }
+        return [PickerSection(title: "Cameras", items: cameras), PickerSection(title: "Videos", items: videos, add: .video)]
     }
 
     func apply(params: KeyParams) {
@@ -841,8 +816,10 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         shadowSwitch.state = params.shadowEnabled > 0.5 ? .on : .off
         keySwitch.state = params.keyEnabled > 0.5 ? .on : .off
         colorSwitch.state = params.colorEnabled > 0.5 ? .on : .off
-        fgMaskSwitch.state = params.fgMasked > 0.5 ? .on : .off
-        fgBlendPopup.selectItem(at: min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1))
+        fgMaskButton.isOn = params.fgMasked > 0.5
+        fgBlendValue = min(max(Int(params.fgBlend + 0.5), 0), Self.blendModes.count - 1)
+        fgBlendButton.isOn = fgBlendValue != 0
+        fgBlendButton.toolTip = "Blend: \(Self.blendModes[fgBlendValue]). How the foreground combines with what is under it, as in an image editor." 
         refreshEnabledStates()
         updateCompositeValues()
         let cb = params.keyCbCr.x - 0.5, cr = params.keyCbCr.y - 0.5, luma = params.keyLuma
@@ -862,9 +839,18 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         return NSColor(srgbRed: c(y + 1.5748 * cr), green: c(y - 0.1873 * cb - 0.4681 * cr), blue: c(y + 1.8556 * cb), alpha: 1)
     }
 
-    /// What a layer's box shows: None, Test page, a URL, a path, or a hex colour.
+    /// What a layer shows: None, Test page, a URL, a path, or a hex colour.
     func showLayer(_ slot: LayerSlot, _ value: String) {
-        (slot == .foreground ? fgField : urlField).stringValue = value
+        layerValues[slot] = value
+        var item = layerItem(value, slot: slot)
+        if case .image = item.thumbnail, value != Self.testPageTitle { item.thumbnail = .web(URL(string: value) ?? URL(string: "https://example.com")!) }
+        if case .image = item.thumbnail, value == Self.testPageTitle { item.thumbnail = .symbol("face.smiling") }
+        // On the tile, an empty layer shows a plus: an invitation to pick something.
+        if Self.layerKind(value) == .none { item.thumbnail = .symbol("plus") }
+        let tile = slot == .foreground ? foregroundTile : backgroundTile
+        tile?.show(item)
+        tile?.optionsHidden = Self.layerKind(value) == .none
+        if case .layer(let s)? = pickerTarget, s == slot { picker.update(sections: layerSections(slot), selected: value) }
     }
 
     /// "#abc", "#aabbcc", "#aabbccdd", or the same without the hash → "#AABBCC[DD]".
@@ -875,38 +861,122 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         return "#" + t.uppercased()
     }
 
-    /// Recent URLs and file paths, most recent first.
+    /// Recent URLs, file paths, and colours, most recent first.
     func setRecents(_ items: [String]) {
         recentURLs = items
-        rebuildURLItems()
+        if case .layer(let slot)? = pickerTarget { picker.update(sections: layerSections(slot), selected: layerValues[slot]) }
     }
 
-    private func rebuildURLItems() {
-        let current = urlField.stringValue
-        displayToValue = [:]
-        let shown = recentURLs.map { value -> String in
-            let display = Self.elideHead(value)
-            displayToValue[display] = value
-            return display
-        }
-        let fgCurrent = fgField.stringValue
-        for field in [urlField, fgField] {
-            field.removeAllItems()
-            field.addItems(withObjectValues: [Self.noneTitle, Self.testPageTitle] + shown + [Self.chooseTitle])
-        }
-        urlField.stringValue = current
-        fgField.stringValue = fgCurrent
+    private enum LayerKind { case none, testPage, file, web, color }
+    private static func layerKind(_ value: String) -> LayerKind {
+        if value == noneTitle || value.isEmpty { return .none }
+        if value == testPageTitle { return .testPage }
+        if hexColor(value) != nil { return .color }
+        if value.hasPrefix("/") || value.hasPrefix("~") || value.hasPrefix("file://") { return .file }
+        return .web
     }
 
-    /// Keep the tail of a long path or URL: that is the part that differs.
-    private static func elideHead(_ text: String, max: Int = 32) -> String {
-        text.count <= max ? text : "…" + text.suffix(max - 1)
+    /// The tile for a layer value. The current web page of `slot` shows its snapshot.
+    private func layerItem(_ value: String, slot: LayerSlot?) -> PickerItem {
+        let current = slot.map { layerValues[$0] == value } ?? false
+        let snapshot = current ? slot.flatMap { layerSnapshot?($0) } : nil
+        switch Self.layerKind(value) {
+        case .none:
+            return PickerItem(value: Self.noneTitle, title: "None", thumbnail: .symbol("nosign"))
+        case .testPage:
+            return PickerItem(value: value, title: "Test page", thumbnail: snapshot.map { .image($0) } ?? .symbol("face.smiling"),
+                              tooltip: "The bundled face tracking demo page, transparent so it works as either layer.")
+        case .color:
+            let hex = Self.hexColor(value) ?? value
+            return PickerItem(value: value, title: hex, thumbnail: .color(Self.nsColor(hex: hex) ?? .clear), removable: true)
+        case .file:
+            let path = value.hasPrefix("file://") ? (URL(string: value)?.path ?? value) : (value as NSString).expandingTildeInPath
+            return PickerItem(value: value, title: PickerLabel.file(path), thumbnail: .file(URL(fileURLWithPath: path)), tooltip: path, removable: true)
+        case .web:
+            let url = URL(string: value.contains("://") ? value : "https://" + value) ?? URL(string: "https://example.com")!
+            return PickerItem(value: value, title: PickerLabel.web(value), thumbnail: snapshot.map { .image($0) } ?? .web(url), tooltip: value, removable: true)
+        }
     }
+
+    private func layerSections(_ slot: LayerSlot) -> [PickerSection] {
+        var files: [PickerItem] = [], webs: [PickerItem] = [], colors: [PickerItem] = []
+        for value in recentURLs {
+            let item = layerItem(value, slot: slot)
+            switch Self.layerKind(value) {
+            case .file: files.append(item)
+            case .web: webs.append(item)
+            case .color: colors.append(item)
+            default: break
+            }
+        }
+        return [
+            PickerSection(title: "Built in", items: [layerItem(Self.noneTitle, slot: slot), layerItem(Self.testPageTitle, slot: slot)]),
+            PickerSection(title: "Images and movies", items: files, add: .file),
+            PickerSection(title: "Web pages", items: webs, add: .web),
+            PickerSection(title: "Colors", items: colors, add: .color),
+        ]
+    }
+
+    static func nsColor(hex: String) -> NSColor? {
+        guard let normalized = hexColor(hex), let v = UInt64(normalized.dropFirst(), radix: 16) else { return nil }
+        let hasAlpha = normalized.count == 9
+        let rgb = hasAlpha ? v >> 8 : v
+        return NSColor(srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255, green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                       blue: CGFloat(rgb & 0xFF) / 255, alpha: hasAlpha ? CGFloat(v & 0xFF) / 255 : 1)
+    }
+
+    // MARK: Picker
+
+    func closePicker() { if picker.isShown { picker.close() } }
+
+    @objc private func sourceTapped() { showSourcePicker() }
+    @objc private func backgroundTapped() { showLayerPicker(.background) }
+    @objc private func foregroundTapped() { showLayerPicker(.foreground) }
+
+    func showSourcePicker() {
+        pickerTarget = .source
+        picker.show(title: "Source", sections: sourceSections(), selected: sourceSelection, from: sourceTile, edge: .minY)
+    }
+
+    /// Open a layer's picker; `entry` opens the web or colour field at once.
+    func showLayerPicker(_ slot: LayerSlot, entry: PickerAddKind? = nil) {
+        pickerTarget = .layer(slot)
+        picker.show(title: slot == .foreground ? "Foreground" : "Background", sections: layerSections(slot),
+                    selected: layerValues[slot], from: (slot == .foreground ? foregroundTile : backgroundTile)!, edge: .minY, openEntry: entry)
+    }
+
+    private func pickerChose(_ value: String) {
+        switch pickerTarget {
+        case .source?:
+            if value.hasPrefix("camera:"), let device = devices.first(where: { "camera:" + $0.uniqueID == value }) { onCameraSelected?(device) }
+            else if value == "testpattern" { onTestPatternSelected?() }
+            else if value == "sample" { onSampleSelected?() }
+            else if value.hasPrefix("video:") { onVideoSelected?(String(value.dropFirst(6))) }
+        case .layer(let slot)?:
+            commitLayer(slot, value)
+        case nil: break
+        }
+    }
+
+    private func pickerRemoved(_ value: String) {
+        if value.hasPrefix("video:") { onRemoveVideo?(String(value.dropFirst(6))) } else { onRemoveRecent?(value) }
+    }
+
+    private func pickerAdded(_ kind: PickerAddKind, _ text: String?) {
+        switch (kind, pickerTarget) {
+        case (.video, _): onChooseVideo?()
+        case (.file, .layer(let slot)?): onLayerChooseFile?(slot)
+        case (.web, .layer(let slot)?), (.color, .layer(let slot)?):
+            if let text { commitLayer(slot, text) }
+        default: break
+        }
+    }
+
 
 
     var supersample: Bool {
-        get { supersampleSwitch.state == .on }
-        set { supersampleSwitch.state = newValue ? .on : .off }
+        get { supersampleButton.isOn }
+        set { supersampleButton.isOn = newValue; supersampleButton.setText(newValue ? "4K" : "HD") }
     }
     var trackFace: Bool {
         get { trackSwitch.state == .on }
@@ -917,8 +987,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         set { depthSwitch.state = newValue ? .on : .off }
     }
     var mirrorPreview: Bool {
-        get { mirrorSwitch.state == .on }
-        set { mirrorSwitch.state = newValue ? .on : .off }
+        get { mirrorButton.isOn }
+        set { mirrorButton.isOn = newValue }
     }
 
     var status: String {
@@ -928,6 +998,7 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     var sinkConnected: Bool = false {
         didSet {
+            guard sinkConnected != oldValue else { return }   // polled every second; relayout only on a change
             sinkStatus.stringValue = sinkConnected ? "Live" : "Not connected"
             sinkStatus.textColor = sinkConnected ? .labelColor : .secondaryLabelColor
             sinkDot.color = sinkConnected ? .systemGreen : .tertiaryLabelColor
@@ -950,17 +1021,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     // MARK: Actions
 
-    @objc private func cameraChanged() {
-        let i = cameraPopup.indexOfSelectedItem
-        let firstVideo = devices.count + 3
-        if devices.indices.contains(i) { onCameraSelected?(devices[i]) }
-        else if i == devices.count + 1 { onTestPatternSelected?() }
-        else if i == devices.count + 2 { onSampleSelected?() }
-        else if i >= firstVideo && i < firstVideo + videoPaths.count { onVideoSelected?(videoPaths[i - firstVideo]) }
-        else if i == cameraPopup.numberOfItems - 1 { onChooseVideo?() }
-    }
 
-    @objc private func supersampleChanged() { onSupersample?(supersampleSwitch.state == .on) }
+    @objc private func supersampleChanged() { supersample.toggle(); onSupersample?(supersample) }
     @objc private func trackChanged() { refreshEnabledStates(); onTrackFace?(trackSwitch.state == .on) }
     @objc private func depthChanged() { onShadowFollowsFace?(depthSwitch.state == .on) }
     @objc private func shadowToggled() {
@@ -971,38 +1033,53 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
-    @objc private func fgMaskToggled() { onParam?(\.fgMasked, fgMaskSwitch.state == .on ? 1 : 0) }
-    @objc private func fgBlendModeChanged() { onParam?(\.fgBlend, Float(fgBlendPopup.indexOfSelectedItem)) }
+    @objc private func fgMaskToggled() { fgMaskButton.isOn.toggle(); onParam?(\.fgMasked, fgMaskButton.isOn ? 1 : 0) }
+
+    /// The blend modes as a menu under the button, the current one checked.
+    @objc private func fgBlendTapped() {
+        let menu = NSMenu()
+        for (i, name) in Self.blendModes.enumerated() {
+            let item = NSMenuItem(title: name, action: #selector(fgBlendChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            item.state = i == fgBlendValue ? .on : .off
+            menu.addItem(item)
+            if i == 0 { menu.addItem(.separator()) }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: fgBlendButton)
+    }
+
+    @objc private func fgBlendChosen(_ sender: NSMenuItem) {
+        fgBlendValue = sender.tag
+        fgBlendButton.isOn = sender.tag != 0
+        fgBlendButton.toolTip = "Blend: \(Self.blendModes[sender.tag]). How the foreground combines with what is under it, as in an image editor."
+        onParam?(\.fgBlend, Float(sender.tag))
+    }
     @objc private func colorToggled() {
         refreshEnabledStates()
         onParam?(\.colorEnabled, colorSwitch.state == .on ? 1 : 0)
     }
 
-    /// Dim and disable what a switched-off feature makes moot: with the key off,
-    /// its controls and the whole Shadow group; with the shadow off, its body.
+    /// Collapse what a switched-off section makes moot, leaving its header.
+    /// Section switches are never disabled, so a section can always be turned
+    /// back on. With the key off, the Shadow body collapses too, since there is
+    /// no matte to cast it.
     private func refreshEnabledStates() {
         let keyOn = keySwitch.state == .on
         let shadowOn = shadowSwitch.state == .on
-        func set(_ view: NSView, _ on: Bool, except: NSControl? = nil) {
-            view.alphaValue = on ? 1 : 0.45
-            func walk(_ v: NSView) {
-                if let c = v as? NSControl, c !== except { c.isEnabled = on }
-                v.subviews.forEach(walk)
-            }
-            walk(view)
-        }
-        set(chromaBody, keyOn)
-        set(keyTools, keyOn, except: keySwitch)
-        keySwitch.isEnabled = true
-        set(shadowGroup, keyOn)
-        if keyOn { set(shadowBody, shadowOn) }
-        set(overlayRow, trackSwitch.state == .on)
-        set(highRateRow, trackSwitch.state == .on)
-        // Colour: everything off with the switch; with auto on, only the slider is dimmed since auto drives it.
         let colorOn = colorSwitch.state == .on
-        set(colorBody, colorOn)
-        if colorOn { set(temperatureCell, temperatureAutoSwitch.state == .off) }
-        temperatureAutoSwitch.isEnabled = colorOn
+        let trackOn = trackSwitch.state == .on
+        chromaBody.isHidden = !keyOn
+        shadowBody.isHidden = !(keyOn && shadowOn)
+        overlayRow.isHidden = !trackOn
+        highRateRow.isHidden = !trackOn
+        colorBody.isHidden = !colorOn
+        for toggle in [keySwitch, shadowSwitch, colorSwitch, trackSwitch] { toggle.isEnabled = true }
+        // Within Color, Auto drives the temperature, so the slider dims while it is on.
+        let manual = temperatureAutoSwitch.state == .off
+        temperatureCell.alphaValue = manual ? 1 : 0.45
+        func enable(_ v: NSView) { (v as? NSControl)?.isEnabled = manual; v.subviews.forEach(enable) }
+        enable(temperatureCell)
     }
 
     var temperatureAuto: Bool {
@@ -1032,9 +1109,8 @@ final class ControlsView: NSView, NSComboBoxDelegate {
     /// Pause shows while live; play shows while frozen.
     var frozen: Bool = false {
         didSet {
-            let name = frozen ? "play.fill" : "pause.fill"
-            freezeButton.image = NSImage(systemSymbolName: name, accessibilityDescription: frozen ? "Resume live video" : "Freeze frame")
-            freezeButton.contentTintColor = frozen ? .controlAccentColor : .secondaryLabelColor
+            freezeButton.setSymbol(frozen ? "play.fill" : "pause.fill", description: frozen ? "Resume live video" : "Freeze frame")
+            freezeButton.isOn = frozen
             freezeButton.toolTip = frozen
                 ? "Frozen on one frame. Click to go back to live video."
                 : "Freeze the current frame so you can tune the key without movement. The virtual camera shows the frozen frame until you resume."
@@ -1044,14 +1120,21 @@ final class ControlsView: NSView, NSComboBoxDelegate {
 
     /// Which matte the chromakey group is set up for. Person hides the colour tools.
     var matteSource: Int {
-        get { matteControl.selectedSegment }
+        get { matteSourceValue }
         set {
-            matteControl.selectedSegment = newValue
-            let person = newValue == 1
-            systemRow.isHidden = newValue != 2
-            keyRangeCell.isHidden = person
-            keySwatch.isHidden = person
-            autoButton.isHidden = person
+            matteSourceValue = newValue == 1 ? 1 : 0   // Apple Chromakey keys like Chromakey
+            let person = matteSourceValue == 1
+            let title = person ? "Background Removal" : "Chromakey"
+            var titleColor = NSColor.labelColor.withAlphaComponent(0.72)
+            effectiveAppearance.performAsCurrentDrawingAppearance {   // resolve now; the title keeps the resolved colour
+                titleColor = NSColor(cgColor: NSColor.labelColor.withAlphaComponent(0.72).cgColor) ?? titleColor
+            }
+            matteMenu.item(at: 0)?.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: titleColor])   // the pull-down dims its title; this lands on the other headers' grey
+            for item in matteMenu.itemArray where item.action == #selector(matteChosen(_:)) {
+                item.state = item.tag == matteSourceValue ? .on : .off
+            }
+            keyRangeRow.isHidden = person   // background removal has no key colour or range
             if let spill = cells[\.spill]?.cell {   // same slider, different job per mode
                 spill.label.stringValue = person ? "Decontaminate" : "Desaturate"
                 let tip = person
@@ -1061,19 +1144,36 @@ final class ControlsView: NSView, NSComboBoxDelegate {
             }
         }
     }
-    /// The Apple-mode status line: what the system effect is doing on this camera.
-    func showSystemStatus(_ text: String) { systemStatus.stringValue = text }
-    @objc private func openVideoEffectsTapped() { onOpenVideoEffects?() }
-    @objc private func saveGreenTapped() { onSaveGreenImage?() }
+    private var matteSourceValue = 0
 
-    @objc private func matteChanged() { matteSource = matteControl.selectedSegment; onMatteSource?(matteControl.selectedSegment) }
+    @objc private func matteChosen(_ sender: NSMenuItem) {
+        guard sender.tag != matteSourceValue else { return }
+        matteSource = sender.tag
+        onMatteSource?(sender.tag)
+    }
+
+    @objc private func appleChromakeyChosen() { onAppleChromakey?() }
 
     /// Auto is running: the button shows it and ignores clicks.
     var autoRunning: Bool = false {
         didSet {
             autoButton.isEnabled = !autoRunning
-            autoButton.title = autoRunning ? "Auto…" : "Auto"
+            updateAutoButtonFill()
         }
+    }
+
+    /// Capsule fill for Auto: a quiet grey, accent while it runs; re-resolved for light and dark.
+    private func updateAutoButtonFill() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            autoButton.layer?.backgroundColor = (autoRunning ? NSColor.controlAccentColor.withAlphaComponent(0.35) : NSColor.quaternaryLabelColor).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAutoButtonFill()
+        // The pull-down's attributed title holds a resolved colour; redraw it for this appearance.
+        effectiveAppearance.performAsCurrentDrawingAppearance { matteSource = matteSourceValue }
     }
 
     /// A line under the Chromakey controls, cleared after `seconds` (nil keeps it).
@@ -1087,17 +1187,24 @@ final class ControlsView: NSView, NSComboBoxDelegate {
         }
     }
 
-    @objc private func mirrorChanged() { onMirrorPreview?(mirrorSwitch.state == .on) }
+    @objc private func mirrorChanged() { mirrorButton.isOn.toggle(); onMirrorPreview?(mirrorButton.isOn) }
+
+    /// The current camera's tile shows a still from it, taken once frames are flowing.
+    private func scheduleSourceThumbnail() {
+        guard let selection = sourceSelection, selection.hasPrefix("camera:") else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, sourceSelection == selection, let image = currentFrameImage?(),
+                  var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
+            item.thumbnail = .image(image)
+            sourceTile.show(item)
+        }
+    }
 
     @objc private func connectedTapped() {
         showSinkDetail.toggle()
         sinkGroup.isHidden = !showSinkDetail
     }
 
-    @objc private func chromaToggled() {
-        chromakeyOpen = chromaDisclosure.state == .on
-        onChromakeyOpen?(chromakeyOpen)
-    }
 
     /// Route a committed combo value: a fixed item, a colour, a file path, or a URL.
     private func commitLayer(_ slot: LayerSlot, _ raw: String) {
@@ -1117,17 +1224,6 @@ final class ControlsView: NSView, NSComboBoxDelegate {
                 onLayerWeb?(slot, text)
             }
         }
-    }
-
-    private func slot(of field: AnyObject?) -> LayerSlot { field === fgField ? .foreground : .background }
-
-    @objc private func urlEntered(_ sender: NSComboBox) { commitLayer(slot(of: sender), sender.stringValue) }
-
-    func comboBoxSelectionDidChange(_ notification: Notification) {
-        guard let field = notification.object as? NSComboBox else { return }
-        let i = field.indexOfSelectedItem
-        guard i >= 0, let item = field.itemObjectValue(at: i) as? String else { return }
-        commitLayer(slot(of: field), displayToValue[item] ?? item)
     }
 
     @objc private func sliderChanged(_ sender: NSSlider) {

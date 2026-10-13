@@ -64,13 +64,16 @@ the output.
   `obsSourceActiveChanged`, and `obsVirtualcamStarted` fire once the page
   loads. The user agent ends in `OBS/31.0.0 Silhouette/<version>`, so a
   user-agent check for OBS passes too.
-- The output is never mirrored. The app's preview is mirrored only for a
-  live camera with Mirror on. `silhouette.mirrored` says which, the
-  `silhouette-mirrored` class on `<html>` tracks it for CSS, and
-  `silhouette.on('mirror', fn)` reports changes. Text that should read
-  correctly in the preview can use
-  `.silhouette-mirrored .label { transform: scaleX(-1) }`; text for the
-  people on the call should not be mirrored.
+- The output is never mirrored, and pages should not flip anything to
+  make up for the preview. The app's preview is mirrored only for a live
+  camera with Mirror on, and then it mirrors the whole frame, layers
+  included, like a mirror; text in a layer reads backwards there and
+  correctly for the people on the call. Call apps often mirror your own
+  self-view in the same way. `silhouette.mirrored` says whether the
+  preview is mirrored, the `silhouette-mirrored` class on `<html>` tracks
+  it for CSS, and
+  `silhouette.on('mirror', fn)` reports changes. Flipping text with it
+  makes the output read backwards, so use it only for preview-only cues.
 - Snapshots cost WebKit GPU time. Avoid `backdrop-filter`, continuous CSS
   transitions, and animation loops; move things only when a face event
   arrives.

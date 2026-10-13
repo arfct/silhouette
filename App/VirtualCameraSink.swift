@@ -48,6 +48,16 @@ final class VirtualCameraSink {
         return true
     }
 
+    /// Whether any app is streaming the virtual camera, from the extension's
+    /// custom property. Nil when not connected or the extension predates it.
+    var isInUse: Bool? {
+        lock.lock(); let stream = streamID, connected = queue != nil; lock.unlock()
+        guard connected else { return nil }
+        let code = VirtualCameraConstants.inUseSelector.utf8.reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        guard let value = Self.string(stream, Int(code)) else { return nil }
+        return value == "1"
+    }
+
     func disconnect() {
         lock.lock(); defer { lock.unlock() }
         guard queue != nil else { return }

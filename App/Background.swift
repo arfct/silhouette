@@ -21,6 +21,17 @@ final class BackgroundController: NSObject {
     private let loader: MTKTextureLoader
     private let textureQueue = DispatchQueue(label: "\(VirtualCameraConstants.appBundleID).background", qos: .utility)
     private var snapshotTimer: Timer?
+    /// The most recent web page snapshot, for the picker's thumbnail.
+    private(set) var lastSnapshot: CGImage?
+    /// Paused: no snapshots and no movie decoding; the layer keeps its last frame.
+    var paused = false {
+        didSet {
+            guard paused != oldValue else { return }
+            videoLock.lock(); let source = videoSource; videoLock.unlock()
+            if paused { stopSnapshots(); source?.stop() }
+            else { if mode == .web { startSnapshots() }; source?.play() }
+        }
+    }
     private var snapshotInFlight = false
     private var snapshotWidth = CGFloat(VirtualCameraConstants.width)
     static let snapshotsPerSecond: TimeInterval = 15
@@ -29,6 +40,9 @@ final class BackgroundController: NSObject {
     private var unchangedCount = 0
     private var uploadTextures: [MTLTexture] = []
     private var uploadIndex = 0
+    /// Movie layer state, touched from the main thread (set up, clear) and the
+    /// camera thread (`pullFrame`), so it is guarded.
+    private let videoLock = NSLock()
     private var videoSource: VideoFileSource?
     private var videoTextureCache: CVMetalTextureCache?
     private var videoTextures: [CVMetalTexture] = []   // keep the frame alive while sampled
@@ -148,8 +162,24 @@ final class BackgroundController: NSObject {
     }
 
     private func stopVideo() {
+        videoLock.lock()
         videoSource?.stop()
         videoSource = nil
+        videoTextures = []
+        videoLock.unlock()
+    }
+
+    /// Called once per rendered frame, before the render: take the movie's
+    /// frame for now, if it has a new one. No timer, no wakeups of its own.
+    func pullFrame() {
+        videoLock.lock(); defer { videoLock.unlock() }
+        guard let videoSource, let cache = videoTextureCache, let pb = videoSource.pull() else { return }
+        var cv: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm,
+                                                  CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &cv)
+        guard let cv, let tex = CVMetalTextureGetTexture(cv) else { return }
+        videoTextures = Array((videoTextures + [cv]).suffix(3))
+        setTexture(tex)
     }
 
     /// A looping movie as the background. Frames are decoded in hardware as
@@ -162,17 +192,8 @@ final class BackgroundController: NSObject {
         webView.isHidden = true
         if videoTextureCache == nil { CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, renderer.device, nil, &videoTextureCache) }
         let source = VideoFileSource(url: url, pixelFormat: kCVPixelFormatType_32BGRA)
-        source.onFrame = { [weak self] pb in
-            guard let self, let cache = videoTextureCache else { return }
-            var cv: CVMetalTexture?
-            CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm,
-                                                      CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 0, &cv)
-            guard let cv, let tex = CVMetalTextureGetTexture(cv) else { return }
-            videoTextures = Array((videoTextures + [cv]).suffix(3))
-            setTexture(tex)
-        }
-        videoSource = source
-        source.start()
+        videoLock.lock(); videoSource = source; videoLock.unlock()
+        if !paused { source.play() }
     }
 
     func setImage(url: URL) {
@@ -233,7 +254,7 @@ final class BackgroundController: NSObject {
     /// One-shot timer so the rate can adapt: fast while the page changes,
     /// slow once several snapshots in a row are identical.
     private func startSnapshots() {
-        guard snapshotTimer == nil else { return }
+        guard snapshotTimer == nil, !paused else { return }
         unchangedCount = 0
         scheduleSnapshot()
     }
@@ -244,7 +265,7 @@ final class BackgroundController: NSObject {
             guard let self else { return }
             snapshotTimer = nil
             snapshot()
-            if mode == .web { scheduleSnapshot() }
+            if mode == .web && !paused { scheduleSnapshot() }
         }
     }
 
@@ -274,6 +295,7 @@ final class BackgroundController: NSObject {
     /// Copy the snapshot into a texture without Core Graphics redrawing it.
     /// Skips the upload entirely when the sampled pixels match the last frame.
     private func upload(_ cg: CGImage) {
+        lastSnapshot = cg
         guard cg.bitsPerPixel == 32, cg.bitsPerComponent == 8,
               let data = cg.dataProvider?.data, let base = CFDataGetBytePtr(data) else {
             if let tex = try? loader.newTexture(cgImage: cg, options: textureOptions) { setTexture(tex) }

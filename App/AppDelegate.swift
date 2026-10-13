@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreImage
 import UniformTypeIdentifiers
 import WebKit
 import os.log
@@ -56,7 +57,6 @@ struct Settings: Codable {
     var recentWebURLs: [String] = []
     /// Security-scoped bookmarks for the file paths in `recentWebURLs`.
     var fileBookmarks: [String: Data] = [:]
-    var chromakeyOpen = false
     var matteSource: Renderer.MatteSource = .chroma
     var temperatureAuto = false
     /// The layer over the keyed camera. The background keeps its original top-level keys.
@@ -112,8 +112,8 @@ struct Settings: Codable {
         mirrorPreview = (try? c.decodeIfPresent(Bool.self, forKey: .mirrorPreview)) ?? true
         shadowFollowsFace = (try? c.decodeIfPresent(Bool.self, forKey: .shadowFollowsFace)) ?? false
         // Keep only well-formed entries (a host with a dot, or localhost).
-        chromakeyOpen = (try? c.decodeIfPresent(Bool.self, forKey: .chromakeyOpen)) ?? false
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
+        if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
         temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
             if $0.hasPrefix("/") || $0.hasPrefix("#") { return true }
@@ -180,8 +180,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var failedStartsSinceReplace = 0
 
+    /// Menu bar item, so Silhouette keeps running with its window closed.
+    private var statusItem: NSStatusItem!
+    private let statusMenu = NSMenu()
+    /// The window is open (not closed; it may still be covered or minimised).
+    private var windowOpen = true
+    /// Read on the render thread: the preview is on screen, so frames go to it.
+    /// False while the window is closed, minimised, or covered, and then a
+    /// frame costs nothing beyond the render and the virtual camera.
+    private let windowOpenLock = NSLock()
+    private var previewLiveForFrames = true
+    private var windowOccluded = false
+    /// The freeze-frame timer skips rendering while idle.
+    private var idleForFrames = false
+    /// An app is streaming the virtual camera, as the extension reports it.
+    /// Unknown counts as in use, so an older extension never idles the app.
+    private var cameraInUse = true
+    /// Window closed and nobody watching: capture, decoding, and snapshots stop.
+    private var idle = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        buildStatusItem()
         buildControls()
         buildWindow()
 
@@ -200,7 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let wantSample = analyzer != nil && CACurrentMediaTime() >= autoNextSample
             if wantSample { autoNextSample = CACurrentMediaTime() + Self.autoFrameSpacing }
             frameLock.unlock()
-            if !frozen { renderer.render(pixelBuffer) }   // frozen: the timer renders the held frame
+            if !frozen {
+                background.pullFrame(); foreground.pullFrame()   // movie layers advance with the camera, no timers
+                renderer.render(pixelBuffer)
+            }   // frozen: the timer renders the held frame
             if wantSample, let analyzer { autoQueue.async { [weak self] in self?.autoSample(pixelBuffer, into: analyzer) } }
         }
         controls.onFreeze = { [weak self] on in self?.setFrozen(on) }
@@ -210,7 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             faceTracker.process(small, camScale: m.scale, camOffset: m.offset)
         }
         renderer.onStats = { [weak self] fps, gpuMs, maskMs in
-            self?.statsLabel.stringValue = maskMs > 0
+            guard let self, windowOpen, !windowOccluded else { return }
+            statsLabel.stringValue = maskMs > 0
                 ? String(format: "%.0f fps · GPU %.2f ms · mask %.1f ms", fps, gpuMs, maskMs)
                 : String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
         }
@@ -230,16 +254,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         renderer.onAutoTemperature = { [weak self] value in self?.controls.showTemperature(value) }
         controls.onOpenVideoEffects = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
         controls.onSaveGreenImage = { [weak self] in self?.saveGreenImage() }
+        controls.onAppleChromakey = { [weak self] in self?.showAppleChromakey() }
         controls.onMatteSource = { [weak self] raw in
             guard let self, let source = Renderer.MatteSource(rawValue: raw) else { return }
             settings.matteSource = source
             renderer.matteSource = source
             cancelAutoKey()
-            watchSystemBackground()
-            if source == .system {
-                // Take people straight to the switch they need.
-                if !systemBackgroundActive { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
-            }
             // Segmentation masks flicker frame to frame; a little Stabilize is the right default.
             if source == .person, renderer.keyParams.temporal == 0 {
                 renderer.update { $0.temporal = 0.3 }
@@ -265,11 +285,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             settings.faceOverlay = on
             preview.showFaceOverlay = on
+            updateTrackingNeeds()
             settings.save()
         }
         faceTracker.onUpdate = { [weak self] state in
             guard let self else { return }
-            preview.showFace(state)
+            if windowOpen && !windowOccluded { preview.showFace(state) }
             renderer.setFace(state)
             background.send(face: state)
             foreground.send(face: state)
@@ -277,16 +298,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         controls.shadowFollowsFace = settings.shadowFollowsFace
         controls.setRecents(settings.recentWebURLs)
-        controls.chromakeyOpen = settings.chromakeyOpen
-        controls.onChromakeyOpen = { [weak self] open in
-            self?.settings.chromakeyOpen = open
-            self?.settings.save()
-        }
         background.onError = { [weak self] message in self?.controls.status = message }
         foreground.onError = { [weak self] message in self?.controls.status = message }
 
         restoreLayer(.background)
         restoreLayer(.foreground)
+        updateTrackingNeeds()
         controls.apply(params: renderer.keyParams)
         updateWindowChrome()
         startCamera()
@@ -303,7 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pollSink()
         }
         installer.activate()
-        connectTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollSink() }
+        connectTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pollSink() }
         pollSink()
 
         NotificationCenter.default.addObserver(self, selector: #selector(devicesChanged),
@@ -316,7 +333,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window keeps the virtual camera running from the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        setWindowOpen(false)
+        // No Dock icon while only the menu bar item is showing.
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        windowOccluded = !window.occlusionState.contains(.visible)
+        updatePreviewLive()
+    }
+
+    /// Whether frames should reach the preview at all.
+    private func updatePreviewLive() {
+        let live = windowOpen && !windowOccluded
+        windowOpenLock.lock(); previewLiveForFrames = live; windowOpenLock.unlock()
+        if live { preview.display(surface: displayedBuffer.flatMap { CVPixelBufferGetIOSurface($0)?.takeUnretainedValue() }) }
+    }
+
+    @objc private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        setWindowOpen(true)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func setWindowOpen(_ open: Bool) {
+        windowOpen = open
+        updatePreviewLive()
+        if !open { controls.closePicker() }
+        updateIdle()
+        updateStatusItem()
+    }
+
+    /// Idle when the window is closed and no app is watching the virtual
+    /// camera: the camera stops capturing and layers stop decoding and
+    /// snapshotting. The extension shows its placeholder until frames return,
+    /// which takes about a second after an app opens the camera.
+    private func updateIdle() {
+        let shouldIdle = !windowOpen && !cameraInUse
+        guard shouldIdle != idle else { return }
+        idle = shouldIdle
+        windowOpenLock.lock(); idleForFrames = shouldIdle; windowOpenLock.unlock()
+        if idle {
+            camera.pause()
+            background.paused = true
+            foreground.paused = true
+        } else {
+            camera.resume()
+            background.paused = false
+            foreground.paused = false
+        }
+        Logger(subsystem: VirtualCameraConstants.appBundleID, category: "power").info("idle \(self.idle)")
+    }
+
+    // MARK: Menu bar item
+
+    private func buildStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusMenu.delegate = self
+        statusItem.menu = statusMenu
+        updateStatusItem()
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        let name = cameraInUse ? "person.crop.rectangle.fill" : "person.crop.rectangle"
+        button.image = NSImage(systemSymbolName: name, accessibilityDescription: "Silhouette")
+        button.toolTip = cameraInUse ? "Silhouette: the virtual camera is in use" : "Silhouette"
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         sink.disconnect()
@@ -329,18 +423,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleOutput(_ buffer: CVPixelBuffer) {
         sink.send(buffer)
-        let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
-        DispatchQueue.main.async { [self] in
-            // Nothing to show while the window is hidden, minimised, or covered.
-            guard window.occlusionState.contains(.visible) else { return }
-            displayedBuffer = buffer
-            preview.display(surface: surface)
-        }
+        windowOpenLock.lock()
+        let showing = previewLiveForFrames
+        if showing { displayedBuffer = buffer }   // keeps the surface alive while the layer shows it
+        windowOpenLock.unlock()
+        guard showing else { return }   // closed, minimised, or covered: the frame only goes to the virtual camera
+        // Straight onto the layer from this thread: no main-thread hop per frame.
+        preview.display(surface: CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue())
     }
 
     private func pollSink() {
         if !sink.isConnected { sink.connect() }
         controls.sinkConnected = sink.isConnected
+        let inUse = sink.isInUse ?? true
+        if inUse != cameraInUse {
+            cameraInUse = inUse
+            updateIdle()
+            updateStatusItem()
+        }
         if extensionReplaced && !sink.isConnected && sink.startFailed {
             failedStartsSinceReplace += 1
             if failedStartsSinceReplace >= 3 { relaunch() }
@@ -378,7 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let bookmark = settings.videoBookmark { settings.fileBookmarks[url.path] = bookmark }
         settings.recentVideos.removeAll { $0 == url.path }
         settings.recentVideos.insert(url.path, at: 0)
-        settings.recentVideos = Array(settings.recentVideos.prefix(10))
+        settings.recentVideos = Array(settings.recentVideos.prefix(12))
         pruneBookmarks()
         settings.save()
         devicesChanged()
@@ -552,7 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func addRecent(_ entry: String) {
         settings.recentWebURLs.removeAll { $0 == entry }
         settings.recentWebURLs.insert(entry, at: 0)
-        settings.recentWebURLs = Array(settings.recentWebURLs.prefix(10))
+        settings.recentWebURLs = Array(settings.recentWebURLs.prefix(24))
         pruneBookmarks()
         controls.setRecents(settings.recentWebURLs)
     }
@@ -596,8 +696,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func setWebPage() {
+        if !windowOpen { showMainWindow() }
         if sidebarItem.isCollapsed { toggleSidebar() }
-        window.makeFirstResponder(controls.urlField)
+        controls.showLayerPicker(.background, entry: .web)
     }
 
     @objc private func clearBackground() { setLayerNone(.background) }
@@ -605,6 +706,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// With no background the keyed camera sits on a checkerboard; with one the composite covers it.
     private func updateWindowChrome() {
         preview.backdrop = background.mode == .none ? .checkerboard : .black
+        updateTrackingNeeds()
+    }
+
+    /// Landmarks are worth their Neural Engine pass only when something shows
+    /// them: a web page layer or the preview overlay.
+    private func updateTrackingNeeds() {
+        faceTracker.needsLandmarks = background.mode == .web || foreground.mode == .web || settings.faceOverlay
+        applyTrackingRate()
     }
 
     // MARK: Params
@@ -625,7 +734,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             frameLock.lock(); let frame = frozenFrame; frameLock.unlock()
-            if let frame { renderer.render(frame) }
+            windowOpenLock.lock(); let idle = idleForFrames; windowOpenLock.unlock()
+            if let frame, !idle {
+                background.pullFrame(); foreground.pullFrame()
+                renderer.render(frame)
+            }
         }
         freezeTimer = timer
         timer.resume()
@@ -666,41 +779,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: Apple's Background effect as a green screen
 
-    private var systemBackgroundActive: Bool {
-        guard #available(macOS 15.0, *), let device = camera.currentDevice else { return false }
-        return device.isBackgroundReplacementActive
+    /// Apple Chromakey: macOS's Background effect replaces the room with a plain
+    /// green image, and Silhouette keys that green like a real green screen.
+    /// A dialog explains the setup and offers its two steps; afterwards the
+    /// section is in Chromakey mode, and Auto runs when the effect turns on.
+    private func showAppleChromakey() {
+        let alert = NSAlert()
+        alert.messageText = "Apple Chromakey"
+        alert.informativeText = """
+        macOS can replace the room behind you with an image, using the Background effect in Video Effects. Give it a plain green image and Silhouette removes that green like a real green screen, with cleaner edges than Background Removal.
+
+        1. Save the green image.
+        2. Open Video Effects, turn on Background, and choose the green image as a custom background.
+
+        \(appleChromakeyStatus())
+        """
+        let save = NSButton(title: "Save Green Image…", target: self, action: #selector(saveGreenImageAction))
+        let effects = NSButton(title: "Open Video Effects", target: self, action: #selector(openVideoEffectsAction))
+        let buttons = NSStackView(views: [save, effects])
+        buttons.spacing = 8
+        buttons.setFrameSize(buttons.fittingSize)
+        alert.accessoryView = buttons
+        alert.addButton(withTitle: "Done")
+        alert.beginSheetModal(for: window) { [weak self] _ in
+            guard let self else { return }
+            if settings.matteSource != .chroma {
+                settings.matteSource = .chroma
+                renderer.matteSource = .chroma
+                controls.matteSource = 0
+                settings.save()
+            }
+            armSystemBackgroundAuto = true
+            watchSystemBackground()
+        }
     }
 
-    /// In Apple mode, follow the current camera's Background effect: explain what
-    /// to do while it is off, and run Auto the moment it turns on.
+    @objc private func saveGreenImageAction() { saveGreenImage() }
+    @objc private func openVideoEffectsAction() { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
+
+    /// One line on whether the current camera can do this.
+    private func appleChromakeyStatus() -> String {
+        guard let device = camera.currentDevice else { return "Choose a camera first: movies and the test pattern have no Video Effects." }
+        guard device.activeFormat.isBackgroundReplacementSupported else {
+            return "\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do."
+        }
+        return device.isBackgroundReplacementActive ? "The Background effect is on for \(device.localizedName)." : "\(device.localizedName) supports the Background effect."
+    }
+
+    /// Set after the Apple Chromakey dialog: run Auto when the current camera's
+    /// Background effect turns on, so the key locks onto its green.
+    private var armSystemBackgroundAuto = false
+
     private func watchSystemBackground() {
         backgroundEffectObservation = nil
-        guard settings.matteSource == .system else { return }
-        guard #available(macOS 15.0, *) else {
-            controls.showSystemStatus("Apple's Background effect needs macOS 15 or later. Use Person instead.")
-            return
+        guard armSystemBackgroundAuto, let device = camera.currentDevice,
+              device.activeFormat.isBackgroundReplacementSupported else { return }
+        if device.isBackgroundReplacementActive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
         }
-        guard let device = camera.currentDevice else {
-            controls.showSystemStatus("Choose a camera. Movies and the test pattern have no system effects.")
-            return
-        }
-        guard device.activeFormat.isBackgroundReplacementSupported else {
-            controls.showSystemStatus("\(device.localizedName) doesn't support the Background effect. The built-in camera and iPhone Continuity Camera do; or use Person.")
-            return
-        }
-        let update: (Bool) -> Void = { [weak self] active in
-            guard let self else { return }
-            if active {
-                controls.showSystemStatus("Background effect is on. Keying its green.")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
-            } else {
-                controls.showSystemStatus("In Video Effects, turn on Background and pick the green image as a custom background. Silhouette keys it as soon as it appears.")
-            }
-        }
-        update(device.isBackgroundReplacementActive)
         backgroundEffectObservation = device.observe(\.isBackgroundReplacementActive, options: [.new]) { _, change in
-            let active = change.newValue ?? false
-            DispatchQueue.main.async { update(active) }
+            guard change.newValue == true else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.runAutoKey() }
         }
     }
 
@@ -710,7 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.nameFieldStringValue = "Silhouette Green.png"
         panel.allowedContentTypes = [.png]
         panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
-        panel.beginSheetModal(for: window) { response in
+        let write: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else { return }
             let w = 1920, h = 1080
             guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -722,6 +861,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             CGImageDestinationAddImage(dest, image, nil)
             CGImageDestinationFinalize(dest)
         }
+        // From the Apple Chromakey dialog the window already has a sheet, so open on its own.
+        if window.attachedSheet != nil { panel.begin(completionHandler: write) } else { panel.beginSheetModal(for: window, completionHandler: write) }
     }
 
     private var currentSourceID: String {
@@ -801,11 +942,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controls.showKeyHint(text, for: 8)
     }
 
-    /// Mirror the preview only for live cameras, where it should behave like a
-    /// mirror. Movies and the test pattern show as recorded. The output is never mirrored.
+    /// Mirror the preview when the Mirror button is on, whatever the source.
+    /// Sources, layers, and the virtual camera output are never mirrored.
     private func updatePreviewMirror() {
-        let liveCamera = !camera.usingTestPattern && camera.currentVideoURL == nil
-        let mirrored = settings.mirrorPreview && liveCamera
+        let mirrored = settings.mirrorPreview
         preview.mirrored = mirrored
         controls.mirrorOffsetPad = mirrored
         background.previewMirrored = mirrored
@@ -817,9 +957,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static let sampleVideoURL = Bundle.main.url(forResource: "Sample", withExtension: "mp4")
 
     /// 15 Hz with a detection every fourth tracked frame, or 30 Hz with one every other.
+    /// With landmarks in use: 15 Hz with a detection every fourth tracked frame,
+    /// or 30 Hz with one every other. Detector only (no web layer, no overlay):
+    /// about six detections a second, which the eased shadow and relight
+    /// cannot tell from more, at a fifth of the Neural Engine work.
     private func applyTrackingRate() {
-        renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
-        faceTracker.detectEvery = settings.faceHighRate ? 2 : 4
+        if faceTracker.needsLandmarks {
+            renderer.trackingDivisor = settings.faceHighRate ? 1 : 2
+            faceTracker.detectEvery = settings.faceHighRate ? 2 : 4
+        } else {
+            renderer.trackingDivisor = 5
+            faceTracker.detectEvery = 1
+        }
     }
 
     /// Face height relative to the frame → shadow multiplier, eased so
@@ -895,6 +1044,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "Silhouette"
+        // Always dark: a video tool, where a light frame around the picture distracts.
+        window.appearance = NSAppearance(named: .darkAqua)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
@@ -931,12 +1082,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         contentHost.addSubview(background.webView)
         contentHost.addSubview(foreground.webView)
         contentHost.addSubview(previewBox)
-        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        statsLabel.textColor = .tertiaryLabelColor
+        contentHost.addSubview(controls.layerStrip)
+        // Frame rate and GPU time: a small badge on the preview's top-right corner
+        // (preview only; the output never has it), clear of the tile captions.
+        statsLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        statsLabel.textColor = .white
         statsLabel.alignment = .right
         statsLabel.toolTip = "Frames per second and GPU time per frame for the keying pipeline."
         statsLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentHost.addSubview(statsLabel)
+        let statsBadge = NSView()
+        statsBadge.wantsLayer = true
+        statsBadge.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        statsBadge.layer?.cornerRadius = 9
+        statsBadge.translatesAutoresizingMaskIntoConstraints = false
+        statsBadge.addSubview(statsLabel)
+        previewContent.addSubview(statsBadge)
+        previewContent.addSubview(controls.previewButtons)
         // 16:9 like the output, as large as the insets allow, pinned to the top.
         let aspect = CGFloat(VirtualCameraConstants.width) / CGFloat(VirtualCameraConstants.height)
         // The sidebar already pads its right edge by 12, so the box starts at the
@@ -944,20 +1105,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let area = NSLayoutGuide()
         contentHost.addLayoutGuide(area)
         previewLeading = area.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor, constant: settings.sidebarVisible ? 0 : 12)
-        let fullWidth = previewBox.widthAnchor.constraint(equalTo: area.widthAnchor)
-        fullWidth.priority = .defaultHigh
+        // The preview (with the tiles above it) is as tall as the window allows
+        // and pinned to the right; the content pane hugs it, so the sidebar takes
+        // whatever width is left. Both sit below the window's own size, so a
+        // short window shrinks the preview instead of growing past the screen.
+        let fillHeight = previewBox.bottomAnchor.constraint(equalTo: area.bottomAnchor)
+        fillHeight.priority = .dragThatCannotResizeWindow
+        let hugPreview = previewBox.leadingAnchor.constraint(equalTo: area.leadingAnchor)
+        hugPreview.priority = NSLayoutConstraint.Priority(480)
         NSLayoutConstraint.activate([
             previewLeading,
             area.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -12),
             area.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 44),
             area.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor, constant: -14),
-            statsLabel.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -16),
-            statsLabel.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 14),
+            statsLabel.leadingAnchor.constraint(equalTo: statsBadge.leadingAnchor, constant: 8),
+            statsLabel.trailingAnchor.constraint(equalTo: statsBadge.trailingAnchor, constant: -8),
+            statsLabel.centerYAnchor.constraint(equalTo: statsBadge.centerYAnchor),
+            statsBadge.heightAnchor.constraint(equalToConstant: 18),
+            statsBadge.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -8),
+            statsBadge.topAnchor.constraint(equalTo: previewContent.topAnchor, constant: 8),
+            controls.previewButtons.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor, constant: -10),
+            controls.previewButtons.bottomAnchor.constraint(equalTo: previewContent.bottomAnchor, constant: -10),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
-            previewBox.topAnchor.constraint(equalTo: area.topAnchor),
-            previewBox.leadingAnchor.constraint(equalTo: area.leadingAnchor),   // left-aligned when height-limited
+            // Background, Source, Foreground above the preview, each a third of its width.
+            // Captions in the title bar, level with the stats; tiles start where the preview used to.
+            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 12),
+            controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
+            controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
+            previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),
+            previewBox.trailingAnchor.constraint(equalTo: area.trailingAnchor),   // right-aligned
+            previewBox.leadingAnchor.constraint(greaterThanOrEqualTo: area.leadingAnchor),
             previewBox.bottomAnchor.constraint(lessThanOrEqualTo: area.bottomAnchor),
-            fullWidth,
+            fillHeight,
+            hugPreview,
             preview.leadingAnchor.constraint(equalTo: previewContent.leadingAnchor),
             preview.trailingAnchor.constraint(equalTo: previewContent.trailingAnchor),
             preview.topAnchor.constraint(equalTo: previewContent.topAnchor),
@@ -969,8 +1149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let sidebarController = NSViewController()
         sidebarController.view = controls
         sidebarItem = NSSplitViewItem(viewController: sidebarController)
-        sidebarItem.minimumThickness = ControlsView.width   // fixed width: no dragging
-        sidebarItem.maximumThickness = ControlsView.width
+        sidebarItem.minimumThickness = ControlsView.width   // grows to fill what the preview leaves
+        sidebarItem.maximumThickness = NSSplitViewItem.unspecifiedDimension
         sidebarItem.canCollapse = true
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
         sidebarItem.isCollapsed = !settings.sidebarVisible
@@ -981,30 +1161,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         splitController.addSplitViewItem(sidebarItem)
         splitController.addSplitViewItem(NSSplitViewItem(viewController: contentController))
 
-        // The whole window is one sheet of Liquid Glass (macOS 26); older systems
-        // get the closest material. Both panes sit on it with no backdrop of their own.
+        // The whole window is one sheet of Liquid Glass. Both panes sit on it
+        // with no backdrop of their own.
         let root = NSViewController()
-        let backdrop: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .regular
-            glass.contentView = splitController.view
-            backdrop = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = .sidebar
-            effect.blendingMode = .behindWindow
-            effect.state = .followsWindowActiveState
-            splitController.view.translatesAutoresizingMaskIntoConstraints = false
-            effect.addSubview(splitController.view)
-            NSLayoutConstraint.activate([
-                splitController.view.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-                splitController.view.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-                splitController.view.topAnchor.constraint(equalTo: effect.topAnchor),
-                splitController.view.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            ])
-            backdrop = effect
-        }
+        let glass = NSGlassEffectView()
+        glass.style = .regular
+        glass.contentView = splitController.view
+        let backdrop: NSView = glass
         root.view = backdrop
         root.addChild(splitController)
         window.isOpaque = false
@@ -1099,6 +1262,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let device = camera.currentDevice { camera.start(device: device) }   // re-pick the preset
         }
         controls.onLayerNone = { [weak self] slot in self?.setLayerNone(slot) }
+        ThumbnailLoader.shared.access = { [weak self] url in
+            self?.settings.fileBookmarks[url.path].flatMap { ScopedFile(bookmark: $0) }
+        }
+        controls.currentFrameImage = { [weak self] in
+            guard let self else { return nil }
+            frameLock.lock(); let frame = latestFrame; frameLock.unlock()
+            return frame.flatMap(Self.thumbnail(of:))
+        }
+        controls.layerSnapshot = { [weak self] slot in
+            guard let self, layer(slot).mode == .web, let cg = layer(slot).lastSnapshot else { return nil }
+            return NSImage(cgImage: cg, size: .zero)
+        }
+        controls.onRemoveRecent = { [weak self] value in
+            guard let self else { return }
+            settings.recentWebURLs.removeAll { $0 == value }
+            pruneBookmarks()
+            settings.save()
+            controls.setRecents(settings.recentWebURLs)
+        }
+        controls.onRemoveVideo = { [weak self] path in
+            guard let self else { return }
+            settings.recentVideos.removeAll { $0 == path }
+            pruneBookmarks()
+            settings.save()
+            devicesChanged()
+        }
         controls.onLayerChooseFile = { [weak self] slot in self?.openImage(for: slot) }
         controls.onLayerWeb = { [weak self] slot, text in self?.setLayerWeb(slot, text) }
         controls.onLayerFile = { [weak self] slot, path in self?.setLayerFile(slot, path: path) }
@@ -1189,4 +1378,37 @@ extension AppDelegate: NSMenuItemValidation {
 private final class InvisibleDividerSplitView: NSSplitView {
     override var dividerThickness: CGFloat { 0 }
     override func drawDivider(in rect: NSRect) {}
+}
+
+// MARK: - Menu bar menu
+
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        menu.removeAllItems()
+        let state = NSMenuItem(title: cameraInUse ? "Virtual camera in use" : "Virtual camera not in use", action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        menu.addItem(state)
+        if !windowOpen && !cameraInUse {
+            let idle = NSMenuItem(title: "Paused until an app uses the camera", action: nil, keyEquivalent: "")
+            idle.isEnabled = false
+            menu.addItem(idle)
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Open Silhouette", action: #selector(showMainWindow), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Silhouette", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+}
+
+extension AppDelegate {
+    /// A small picture of a camera frame, for the source picker.
+    static func thumbnail(of frame: CVPixelBuffer) -> NSImage? {
+        let image = CIImage(cvPixelBuffer: frame)
+        let scale = 320 / max(image.extent.width, 1)
+        let small = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cg = thumbnailContext.createCGImage(small, from: small.extent) else { return nil }
+        return NSImage(cgImage: cg, size: .zero)
+    }
+    private static let thumbnailContext = CIContext(options: [.cacheIntermediates: false])
 }

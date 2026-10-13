@@ -9,7 +9,7 @@ Hang a green or blue backdrop, point your camera at it, and Silhouette removes i
 - Optional on-device face tracking, available to web page layers through a JavaScript API.
 - An Apple camera extension: no kernel extensions and no disabled security settings.
 
-Requires macOS 14 or later and a physical green or blue backdrop.
+Requires macOS 26 or later. A physical green or blue backdrop gives the best results; Background Removal works without one.
 
 ## Links
 
