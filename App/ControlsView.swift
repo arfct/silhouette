@@ -1295,15 +1295,27 @@ final class ControlsView: NSView {
 
     @objc private func mirrorChanged() { mirrorButton.isOn.toggle(); onMirrorPreview?(mirrorButton.isOn) }
 
-    /// The current camera's tile shows a still from it, taken once frames are flowing.
+    /// The Source tile shows a still from the live source: one soon after a
+    /// switch, once frames are flowing, then a fresh one every few seconds
+    /// while the window is visible. A small picture, so the cost is nothing.
+    private var sourceThumbnailTimer: Timer?
     private func scheduleSourceThumbnail() {
-        guard let selection = sourceSelection, selection.hasPrefix("camera:") else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, sourceSelection == selection, let image = currentFrameImage?(),
-                  var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
-            item.thumbnail = .image(image)
-            sourceTile.show(item)
+        sourceThumbnailTimer?.invalidate()
+        sourceThumbnailTimer = nil
+        guard sourceSelection != nil else { return }
+        // Twice early: a camera can take a couple of seconds to deliver after a switch.
+        for delay in [1.5, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refreshSourceThumbnail() }
         }
+        sourceThumbnailTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.refreshSourceThumbnail() }
+    }
+
+    private func refreshSourceThumbnail() {
+        guard let selection = sourceSelection, window?.occlusionState.contains(.visible) == true,
+              let image = currentFrameImage?(),
+              var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
+        item.thumbnail = .image(image)
+        sourceTile.show(item)
     }
 
 
