@@ -281,6 +281,9 @@ final class ControlsView: NSView {
     var layerSnapshot: ((LayerSlot) -> NSImage?)?
     /// Forget a layer recent (URL, path, or colour), or a recent movie source by path.
     var onRemoveRecent: ((String) -> Void)?
+    var onForgetFolder: ((String) -> Void)?
+    /// Folders of backgrounds, each listed as its own picker section.
+    private var sceneFolders: [(path: String, name: String, files: [String])] = []
     var onRemoveVideo: ((String) -> Void)?
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
@@ -395,6 +398,7 @@ final class ControlsView: NSView {
         layerStrip.translatesAutoresizingMaskIntoConstraints = false
         picker.onSelect = { [weak self] value in self?.pickerChose(value) }
         picker.onRemove = { [weak self] value in self?.pickerRemoved(value) }
+        picker.onForget = { [weak self] path in self?.onForgetFolder?(path) }
         picker.onAdd = { [weak self] kind, text in self?.pickerAdded(kind, text) }
         showLayer(.background, Self.noneTitle)
         showLayer(.foreground, Self.noneTitle)
@@ -524,11 +528,7 @@ final class ControlsView: NSView {
             sliderCell("Highlights", \.highlights, 0...1, scale: 100, decimals: 0,
                        tip: "How much the relight adds light as well as tint. 0 keeps your brightness; 100 adds strong highlights, more on skin and light clothing than on dark hair."),
         ])
-        let wrapRow = columns([
-            sliderCell("Wrap", \.wrap, 0...1, scale: 100, decimals: 0,
-                       tip: "Light wrap: lets the background show through your soft edges, so hair and shoulders take on the scene instead of ending in a hard line. Needs a background layer."),
-        ])
-        let colorStack = NSStackView(views: [temperatureRow, exposureRow, relightRow, wrapRow])
+        let colorStack = NSStackView(views: [temperatureRow, exposureRow, relightRow])
         colorStack.orientation = .vertical
         colorStack.alignment = .leading
         colorStack.spacing = 8
@@ -891,6 +891,11 @@ final class ControlsView: NSView {
         if case .layer(let slot)? = pickerTarget { picker.update(sections: layerSections(slot), selected: layerValues[slot]) }
     }
 
+    func setSceneFolders(_ folders: [(path: String, name: String, files: [String])]) {
+        sceneFolders = folders
+        if case .layer(let slot)? = pickerTarget { picker.update(sections: layerSections(slot), selected: layerValues[slot]) }
+    }
+
     private enum LayerKind { case none, testPage, file, web, color }
     private static func layerKind(_ value: String) -> LayerKind {
         if value == noneTitle || value.isEmpty { return .none }
@@ -901,7 +906,7 @@ final class ControlsView: NSView {
     }
 
     /// The tile for a layer value. The current web page of `slot` shows its snapshot.
-    private func layerItem(_ value: String, slot: LayerSlot?) -> PickerItem {
+    private func layerItem(_ value: String, slot: LayerSlot?, removable: Bool = true) -> PickerItem {
         let current = slot.map { layerValues[$0] == value } ?? false
         let snapshot = current ? slot.flatMap { layerSnapshot?($0) } : nil
         switch Self.layerKind(value) {
@@ -915,7 +920,7 @@ final class ControlsView: NSView {
             return PickerItem(value: value, title: hex, thumbnail: .color(Self.nsColor(hex: hex) ?? .clear), removable: true)
         case .file:
             let path = value.hasPrefix("file://") ? (URL(string: value)?.path ?? value) : (value as NSString).expandingTildeInPath
-            return PickerItem(value: value, title: PickerLabel.file(path), thumbnail: .file(URL(fileURLWithPath: path)), tooltip: path, removable: true)
+            return PickerItem(value: value, title: PickerLabel.file(path), thumbnail: .file(URL(fileURLWithPath: path)), tooltip: path, removable: removable)
         case .web:
             let url = URL(string: value.contains("://") ? value : "https://" + value) ?? URL(string: "https://example.com")!
             return PickerItem(value: value, title: PickerLabel.web(value), thumbnail: snapshot.map { .image($0) } ?? .web(url), tooltip: value, removable: true)
@@ -925,6 +930,9 @@ final class ControlsView: NSView {
     private func layerSections(_ slot: LayerSlot) -> [PickerSection] {
         var files: [PickerItem] = [], webs: [PickerItem] = [], colors: [PickerItem] = []
         for value in recentURLs {
+            // A scene's tint map belongs to its background; the Background picker does not list it.
+            if slot == .background, Self.layerKind(value) == .file,
+               URL(fileURLWithPath: value).deletingPathExtension().lastPathComponent.hasSuffix("-foreground") { continue }
             let item = layerItem(value, slot: slot)
             switch Self.layerKind(value) {
             case .file: files.append(item)
@@ -933,12 +941,20 @@ final class ControlsView: NSView {
             default: break
             }
         }
-        return [
+        var sections = [
             PickerSection(title: "Built in", items: [layerItem(Self.noneTitle, slot: slot), layerItem(Self.testPageTitle, slot: slot)]),
             PickerSection(title: "Images and movies", items: files, add: .file),
+        ]
+        if slot == .background {
+            for folder in sceneFolders {
+                sections.append(PickerSection(title: folder.name, items: folder.files.map { layerItem($0, slot: slot, removable: false) }, forget: folder.path))
+            }
+        }
+        sections += [
             PickerSection(title: "Web pages", items: webs, add: .web),
             PickerSection(title: "Colors", items: colors, add: .color),
         ]
+        return sections
     }
 
     static func nsColor(hex: String) -> NSColor? {

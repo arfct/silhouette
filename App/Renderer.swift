@@ -57,8 +57,6 @@ struct KeyParams: Codable, Equatable {
     var light1Color = SIMD4<Float>(repeating: 0)
     /// Foreground blend mode: index into ControlsView.blendModes, 0 = normal.
     var fgBlend: Float = 0
-    /// Light wrap, 0…1: how far the background shows through the soft edge of the matte.
-    var wrap: Float = 0.5
     /// Exposure of the subject in stops, applied in linear light.
     var exposure: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
@@ -97,7 +95,6 @@ struct KeyParams: Codable, Equatable {
         relight = f(.relight, d.relight)
         fgBlend = f(.fgBlend, d.fgBlend)
         highlights = f(.highlights, d.highlights)
-        wrap = f(.wrap, d.wrap)
         exposure = f(.exposure, d.exposure)
     }
 }
@@ -557,7 +554,7 @@ final class Renderer {
         lastCameraBuffer = camera
         lastCamScale = camScale
         lastCamOffset = camOffset
-        if p.colorEnabled < 0.5 || bg == nil { p.relight = 0; p.wrap = 0 }   // nothing to light with, nothing to wrap
+        if p.colorEnabled < 0.5 || bg == nil { p.relight = 0 }   // nothing to light with
         if p.relight > 0 {
             p.aspect = Float(outputWidth) / Float(outputHeight)
             p.wrapRows = Float(Self.wrapSize.h)
@@ -707,18 +704,15 @@ final class Renderer {
             }
         }
 
-        // The soft matte: the matte to 96×54 and blurred, for the light wrap
-        // and as the weight of every effect on the subject. Relight maps: the
+        // The soft matte: the matte to 96×54 and blurred, the weight of every
+        // effect on the subject. Relight maps: the
         // background to 64×36 and blurred for the lights, the camera luma to
         // 96×54 and widely blurred as the albedo reference. A grid-sampling
         // kernel does the big downscales cheaply.
         let relighting = p.relight > 0 && p.bypass < 0.5 && bg != nil
-        let softening = relighting || (p.wrap > 0 && p.bypass < 0.5)
-        if softening, let enc = cmd.makeComputeCommandEncoder() {
+        if relighting, let bg, let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(shrinkPipeline)
-            var jobs = [(matteSource, wrapScratch!)]
-            if relighting, let bg { jobs += [(bg, lightScratch!), (luma.texture, albedoScratch!)] }
-            for (src, dst) in jobs {
+            for (src, dst) in [(matteSource, wrapScratch!), (bg, lightScratch!), (luma.texture, albedoScratch!)] {
                 enc.setTexture(src, index: 0); enc.setTexture(dst, index: 1)
                 enc.dispatchThreads(MTLSize(width: dst.width, height: dst.height, depth: 1),
                                     threadsPerThreadgroup: MTLSize(width: 16, height: 6, depth: 1))
@@ -794,7 +788,7 @@ final class Renderer {
         enc.setFragmentTexture(fg ?? dummyBackground, index: 5)
         enc.setFragmentTexture(backgroundEstimate, index: 6)
         enc.setFragmentTexture(illumBlurred, index: 7)
-        enc.setFragmentTexture(softening ? wrapTexture : dummyBackground, index: 8)
+        enc.setFragmentTexture(relighting ? wrapTexture : dummyBackground, index: 8)
         enc.setFragmentTexture(relighting ? albedoTexture : dummyBackground, index: 9)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)

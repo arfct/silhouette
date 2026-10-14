@@ -83,6 +83,8 @@ struct Settings: Codable {
     var recentWebURLs: [String] = []
     /// Security-scoped bookmarks for the file paths in `recentWebURLs`.
     var fileBookmarks: [String: Data] = [:]
+    /// Folders of backgrounds the user added; their bookmarks live in fileBookmarks.
+    var sceneFolders: [String] = []
     var matteSource: Renderer.MatteSource = .chroma
     var temperatureAuto = false
     var exposureAuto = false
@@ -157,6 +159,7 @@ struct Settings: Codable {
         if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
         temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
         exposureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .exposureAuto)) ?? false
+        sceneFolders = (try? c.decodeIfPresent([String].self, forKey: .sceneFolders)) ?? []
         presets = (try? c.decodeIfPresent([Preset].self, forKey: .presets)) ?? []
         currentPreset = try? c.decodeIfPresent(UUID.self, forKey: .currentPreset)
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
@@ -364,6 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         background.onError = { [weak self] message in self?.controls.status = message }
         foreground.onError = { [weak self] message in self?.controls.status = message }
 
+        resolveSceneFolders()   // before the layers, so a file inside a folder is readable
         restoreLayer(.background)
         restoreLayer(.foreground)
         updateTrackingNeeds()
@@ -573,7 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Drop bookmarks for files no recent list mentions any more.
     private func pruneBookmarks() {
-        let keep = Set(settings.recentWebURLs + settings.recentVideos)
+        let keep = Set(settings.recentWebURLs + settings.recentVideos + settings.sceneFolders)
         settings.fileBookmarks = settings.fileBookmarks.filter { keep.contains($0.key) }
     }
 
@@ -762,18 +766,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func openImage(for slot: LayerSlot) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image, .movie]
-        // A background may come with its tint map: select both and they pair up.
+        // A background may come with its tint map beside it. Choosing the folder
+        // lets the app read both, and lists every scene in it in the picker.
         panel.allowsMultipleSelection = slot == .background
-        if slot == .background { panel.message = "Choose a background. A \u{201C}-foreground\u{201D} file beside it loads as the tint; select both if it does not." }
+        panel.canChooseDirectories = slot == .background
+        if slot == .background { panel.message = "Choose a background, or a folder of them. A \u{201C}-foreground\u{201D} file beside a background loads as its tint." }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
             guard response == .OK, !panel.urls.isEmpty else {
                 syncLayerField(slot)
                 return
             }
-            let url = panel.urls.first { Self.foregroundCompanionName($0) == nil } ?? panel.urls[0]
-            setLayerImage(slot, url)
+            let folders = panel.urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            let files = panel.urls.filter { !folders.contains($0) }
+            folders.forEach(addSceneFolder)
+            if let url = files.first(where: { Self.foregroundCompanionName($0) == nil }) ?? files.first {
+                setLayerImage(slot, url)
+            } else {
+                syncLayerField(slot)
+                if !folders.isEmpty { controls.showLayerPicker(slot) }   // show the new section
+            }
         }
+    }
+
+    // MARK: Scene folders
+
+    /// Access to the folders of backgrounds, held for the app's lifetime.
+    private var folderAccess: [String: ScopedFile] = [:]
+
+    /// Reopen every remembered folder through its bookmark.
+    private func resolveSceneFolders() {
+        for path in settings.sceneFolders where folderAccess[path] == nil {
+            if let bookmark = settings.fileBookmarks[path], let file = ScopedFile(bookmark: bookmark) { folderAccess[path] = file }
+        }
+        refreshSceneFolders()
+    }
+
+    private func addSceneFolder(_ url: URL) {
+        let scoped = ScopedFile(url: url)
+        let path = url.path
+        if let bookmark = scoped.bookmark { settings.fileBookmarks[path] = bookmark }
+        folderAccess[path] = scoped
+        settings.sceneFolders.removeAll { $0 == path }
+        settings.sceneFolders.append(path)
+        settings.save()
+        refreshSceneFolders()
+    }
+
+    private func forgetSceneFolder(_ path: String) {
+        settings.sceneFolders.removeAll { $0 == path }
+        folderAccess[path] = nil
+        pruneBookmarks()
+        settings.save()
+        refreshSceneFolders()
+    }
+
+    /// The backgrounds in each folder: images and movies, without the tint
+    /// maps (they load with their scene) or WebM (which does not play).
+    private func refreshSceneFolders() {
+        let lists = settings.sceneFolders.map { path -> (path: String, name: String, files: [String]) in
+            let url = folderAccess[path]?.url ?? URL(fileURLWithPath: path)
+            let entries = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+            let files = entries.filter { entry in
+                let type = UTType(filenameExtension: entry.pathExtension) ?? .data
+                guard type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video) else { return false }
+                return entry.pathExtension.lowercased() != "webm" && Self.foregroundCompanionName(entry) == nil
+            }.map(\.path).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            return (path, url.lastPathComponent, files)
+        }
+        controls.setSceneFolders(lists)
     }
 
     /// The base name of a "-foreground" tint map, or nil for any other file.
@@ -1552,6 +1613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self, layer(slot).mode == .web, let cg = layer(slot).lastSnapshot else { return nil }
             return NSImage(cgImage: cg, size: .zero)
         }
+        controls.onForgetFolder = { [weak self] path in self?.forgetSceneFolder(path) }
         controls.onRemoveRecent = { [weak self] value in
             guard let self else { return }
             settings.recentWebURLs.removeAll { $0 == value }

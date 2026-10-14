@@ -39,7 +39,6 @@ struct KeyParams {
     float4 light1;
     float4 light1Color;
     float  fgBlend;        // foreground blend mode: 0 normal, else see blendForeground
-    float  wrap;           // 0…1 light wrap: the background shows through where the soft matte is thin
     float  exposure;       // exposure of the subject in stops, a gain in linear light
 };
 
@@ -400,7 +399,7 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     // The soft matte: the matte shrunk and blurred, about a percent of the
     // frame wide. Effects on the subject are weighted by min(matte, soft)²,
     // which stops short of the edge and never reaches the background.
-    float soft = (P.relight > 0.0 || P.wrap > 0.0) && P.bypass < 0.5 ? softTex.sample(s, in.uv).r : a;
+    float soft = P.relight > 0.0 && P.bypass < 0.5 ? softTex.sample(s, in.uv).r : a;
     float effectWeight = min(a, soft); effectWeight *= effectWeight;
 
     // Relight from the illumination map (see relightMap), low resolution,
@@ -423,10 +422,6 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
             rgb = linearToSrgb(saturate(lin));
         }
     }
-
-    // Light wrap: where the soft matte is thin the background shows through,
-    // so the edge takes on the scene instead of ending in a hard line.
-    if (P.wrap > 0.0 && P.bypass < 0.5) a = min(a, soft / P.wrap);
 
     // A masked foreground is clipped to the subject: blended with the
     // subject's own colour before it meets the background, so edge pixels keep
@@ -574,7 +569,9 @@ fragment float4 relightMap(VSOut in [[stage_in]],
     float4 fresh = float4(1.0, 1.0, 1.0, 0.0);
     if (kSum > 1e-4) {
         float3 tint = lightSum / max(max(lightSum.r, max(lightSum.g, lightSum.b)), 1e-4);
-        float k = min(kSum, 1.0) * P.relight;
+        // The slider's bottom end is gentle: a few percent of a saturated
+        // tint already shows on skin, so the strength rises as a power curve.
+        float k = min(kSum, 1.0) * pow(P.relight, 1.7);
         fresh = float4(mix(float3(1.0), tint, k), k);
     }
     if (P.illumReset > 0.5) return fresh;
