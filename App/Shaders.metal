@@ -338,6 +338,19 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
         rgb = saturate(rgb * f.rgb * (1.0 + P.highlights * f.a));
     }
 
+    // A masked foreground is clipped to the subject: blended with the
+    // subject's own colour before it meets the background, so edge pixels keep
+    // an untinted background behind them. This is how a multiplied tint map
+    // (as Meet's scene foregrounds) relights the person and nothing else.
+    if (P.hasForeground > 0.5 && P.fgMasked > 0.5) {
+        float4 fg = fgTex.sample(s, in.uv * P.fgScale + P.fgOffset);
+        if (fg.a > 1e-4) {
+            float3 cs = fg.rgb / fg.a;
+            float3 blended = P.fgBlend > 0.5 ? blendForeground(int(P.fgBlend + 0.5), rgb, cs) : cs;
+            rgb = mix(rgb, blended, fg.a);
+        }
+    }
+
     // Everything below is premultiplied. The shadow is black, so over the
     // background it darkens colour and adds coverage where the background is clear.
     float4 out;
@@ -349,9 +362,8 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
     } else {
         out = float4(rgb * a, a + (1.0 - a) * shadow);
     }
-    if (P.hasForeground > 0.5) {
+    if (P.hasForeground > 0.5 && P.fgMasked < 0.5) {
         float4 fg = fgTex.sample(s, in.uv * P.fgScale + P.fgOffset);
-        if (P.fgMasked > 0.5) fg *= a;   // premultiplied, so one multiply confines it to the subject
         if (P.fgBlend > 0.5 && fg.a > 1e-4) {
             // Separable blend modes as in the W3C compositing spec: the source
             // colour is replaced by its blend with the backdrop where there is

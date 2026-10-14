@@ -695,6 +695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settings.save()
         syncLayerField(slot)
         updateWindowChrome()
+        if slot == .background, Self.foregroundCompanionName(url) == nil, let (companion, file) = foregroundCompanion(of: url) {
+            loadForegroundCompanion(companion, file: file)
+        }
     }
 
     /// A path typed into a combo or picked from its recents. A saved bookmark
@@ -746,15 +749,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func openImage(for slot: LayerSlot) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image, .movie]
-        panel.allowsMultipleSelection = false
+        // A background may come with its tint map: select both and they pair up.
+        panel.allowsMultipleSelection = slot == .background
+        if slot == .background { panel.message = "Choose a background. A \u{201C}-foreground\u{201D} file beside it loads as the tint; select both if it does not." }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
-            guard response == .OK, let url = panel.url else {
+            guard response == .OK, !panel.urls.isEmpty else {
                 syncLayerField(slot)
                 return
             }
+            let url = panel.urls.first { Self.foregroundCompanionName($0) == nil } ?? panel.urls[0]
             setLayerImage(slot, url)
         }
+    }
+
+    /// The base name of a "-foreground" tint map, or nil for any other file.
+    private static func foregroundCompanionName(_ url: URL) -> String? {
+        let name = url.deletingPathExtension().lastPathComponent
+        return name.hasSuffix("-foreground") ? String(name.dropLast("-foreground".count)) : nil
+    }
+
+    /// Scene packs ship a background with a tint map beside it: "Rainy cafe.mp4"
+    /// and "Rainy cafe-foreground.mp4", a soft colour map to multiply onto the
+    /// subject so their light matches the scene. The sandbox only lets us read
+    /// a sibling the user has chosen at some point, so this finds one that is
+    /// readable now or that a saved bookmark reopens. Movies first, as the
+    /// packs are movies; no WebM, which AVFoundation cannot play.
+    private func foregroundCompanion(of url: URL) -> (URL, ScopedFile?)? {
+        let dir = url.deletingLastPathComponent()
+        let name = url.deletingPathExtension().lastPathComponent + "-foreground"
+        var extensions = ["mp4", "mov", "m4v", "png", "jpg", "jpeg", "heic"]
+        extensions.removeAll { $0 == url.pathExtension.lowercased() }
+        extensions.insert(url.pathExtension, at: 0)
+        for ext in extensions {
+            let candidate = dir.appendingPathComponent(name).appendingPathExtension(ext)
+            if FileManager.default.isReadableFile(atPath: candidate.path) { return (candidate, nil) }
+            if let file = settings.fileBookmarks[candidate.path].flatMap({ ScopedFile(bookmark: $0) }),
+               FileManager.default.isReadableFile(atPath: file.url.path) { return (file.url, file) }
+        }
+        return nil
+    }
+
+    /// The tint map as the foreground, masked to the subject and multiplied.
+    private func loadForegroundCompanion(_ url: URL, file: ScopedFile?) {
+        setLayerImage(.foreground, url, file: file)
+        renderer.update { $0.fgMasked = 1; $0.fgBlend = 1 }   // 1 = Multiply
+        controls.apply(params: renderer.keyParams)
+        paramsChanged()
     }
 
     @objc private func setWebPage() {
