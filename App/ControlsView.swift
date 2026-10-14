@@ -307,10 +307,7 @@ final class ControlsView: NSView {
     private var sinkGroup: NSView!
     private var showSinkDetail = false
     /// Title-bar indicator shown while the virtual camera is live; tapping it shows the detail.
-    private let connectedButton = NSButton(title: "Connected", target: nil, action: nil)
-    private let connectedDot = StatusDot()
     private var chromaBody: NSView!
-    private var connectedRow: NSStackView!
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
@@ -343,7 +340,7 @@ final class ControlsView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 43, left: 12, bottom: 14, right: 12)   // the first box lines up with the tiles below the caption row
+        stack.edgeInsets = NSEdgeInsets(top: 37, left: 12, bottom: 14, right: 12)   // the first box lines up with the tiles below the caption row
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // Virtual camera: status in the header; buttons and help only while not live.
@@ -360,20 +357,6 @@ final class ControlsView: NSView {
         sinkGroup = group("Virtual camera", trailing: statusRow, rows: [sinkButtons, statusLabel])
         stack.addArrangedSubview(sinkGroup)
 
-        // Title-area indicator (top right of the sidebar), only while live.
-        connectedDot.color = .systemGreen
-        connectedButton.isBordered = false
-        connectedButton.font = .systemFont(ofSize: 11, weight: .medium)
-        connectedButton.contentTintColor = .secondaryLabelColor
-        connectedButton.target = self
-        connectedButton.action = #selector(connectedTapped)
-        connectedButton.toolTip = "The virtual camera is live. Click for details."
-        let connectedRow = NSStackView(views: [connectedDot, connectedButton])
-        connectedRow.spacing = 5
-        connectedRow.translatesAutoresizingMaskIntoConstraints = false
-        connectedRow.identifier = NSUserInterfaceItemIdentifier("connectedRow")
-        connectedRow.isHidden = true
-        self.connectedRow = connectedRow
 
         trackSwitch.target = self; trackSwitch.action = #selector(trackChanged)
 
@@ -606,8 +589,7 @@ final class ControlsView: NSView {
         let doc = FlippedView()
         doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(stack)
-        doc.addSubview(connectedRow)   // in the document, so it scrolls with the groups
-        doc.addSubview(presetMenu)
+        doc.addSubview(presetMenu)   // in the document, so it scrolls with the groups
         scroll.documentView = doc
         addSubview(scroll)
         NSLayoutConstraint.activate([
@@ -620,11 +602,11 @@ final class ControlsView: NSView {
             stack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
             stack.topAnchor.constraint(equalTo: doc.topAnchor),
             stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
-            connectedRow.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
-            connectedRow.topAnchor.constraint(equalTo: doc.topAnchor, constant: 18),   // centred on the window buttons
-            presetMenu.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 96),   // clear of the window buttons
-            presetMenu.trailingAnchor.constraint(lessThanOrEqualTo: connectedRow.leadingAnchor, constant: -12),
-            presetMenu.centerYAnchor.constraint(equalTo: connectedRow.centerYAnchor),
+            // Right-aligned in the sidebar's title area, clear of the window
+            // buttons, centred in the space above the first box.
+            presetMenu.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
+            presetMenu.leadingAnchor.constraint(greaterThanOrEqualTo: doc.leadingAnchor, constant: 96),
+            presetMenu.topAnchor.constraint(equalTo: doc.topAnchor, constant: 12),
         ])
         for v in stack.arrangedSubviews { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true }
         updateSinkVisibility()
@@ -779,7 +761,6 @@ final class ControlsView: NSView {
         statusLabel.isHidden = sinkConnected || statusLabel.stringValue.isEmpty
         if !sinkConnected { showSinkDetail = false }
         sinkGroup?.isHidden = sinkConnected && !showSinkDetail
-        connectedRow?.isHidden = !sinkConnected
     }
 
 
@@ -1273,10 +1254,6 @@ final class ControlsView: NSView {
         }
     }
 
-    @objc private func connectedTapped() {
-        showSinkDetail.toggle()
-        sinkGroup.isHidden = !showSinkDetail
-    }
 
 
     /// Route a committed combo value: a fixed item, a colour, a file path, or a URL.

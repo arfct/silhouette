@@ -386,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)   // no text field selected at launch
         NSApp.activate(ignoringOtherApps: true)
+        placeWindowButtons()
     }
 
     /// Closing the window keeps the virtual camera running from the menu bar.
@@ -395,6 +396,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showMainWindow()
         return true
     }
+
+    func windowDidResize(_ notification: Notification) { placeWindowButtons() }
+    func windowDidBecomeKey(_ notification: Notification) { placeWindowButtons() }
+    func windowDidResignKey(_ notification: Notification) { placeWindowButtons() }
+    func windowDidExitFullScreen(_ notification: Notification) { placeWindowButtons() }
 
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === window else { return }
@@ -420,6 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setWindowOpen(true)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        placeWindowButtons()
     }
 
     private func setWindowOpen(_ open: Bool) {
@@ -1236,6 +1243,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: UI construction
 
+    /// The window buttons, centred on the caption row (20 points from the top)
+    /// rather than in the full toolbar-height title bar. AppKit lays them out
+    /// again on resize, so this runs after each layout.
+    private func placeWindowButtons() {
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(type), let bar = button.superview else { continue }
+            var frame = button.frame
+            frame.origin.y = bar.bounds.height - 20 - frame.height / 2
+            button.frame = frame
+        }
+    }
+
     private func buildWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960 + ControlsView.width, height: 540),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -1247,7 +1266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         // An empty toolbar makes the title bar toolbar-height, which brings the
-        // window buttons down and in, level with the captions beside them.
+        // window buttons in; placeWindowButtons centres them on the captions.
         let toolbar = NSToolbar(identifier: "titlebar")
         toolbar.showsBaselineSeparator = false
         window.toolbar = toolbar
@@ -1331,8 +1350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controls.previewButtons.bottomAnchor.constraint(equalTo: previewContent.bottomAnchor, constant: -10),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
             // Background, Source, Foreground above the preview, each a third of its width.
-            // Captions in the title bar, centred on the window buttons; the tiles start below them.
-            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 18),
+            // Captions in the title bar, centred in the space above the tiles, level with the window buttons.
+            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 12),
             controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
             controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
             previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),
