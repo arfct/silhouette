@@ -452,8 +452,8 @@ final class ControlsView: NSView {
         keyRange.setAccessibilityRole(.slider)
         keyRange.setAccessibilityLabel("Color Range")
         // Presets: a text-only pull-down in the title bar, after the traffic
-        // lights, in the tile captions' style. Every change is kept in the
-        // current preset.
+        // lights, showing the current preset's name. Every change is kept in
+        // the current preset.
         presetMenu.translatesAutoresizingMaskIntoConstraints = false
         presetMenu.isBordered = false
         presetMenu.addItem(withTitle: "")   // the pull-down's title, set in setPresets
@@ -975,16 +975,16 @@ final class ControlsView: NSView {
             presetMenu.lastItem?.target = self
             presetMenu.lastItem?.action = #selector(presetChosen(_:))
         }
-        // The title: PRESET in the captions' grey, then the name, as the tiles show theirs.
-        var grey = NSColor.secondaryLabelColor, text = NSColor.labelColor
+        // The title is the preset's name, as the tiles show their choice. The
+        // Default preset reads "Presets", so the menu names itself until a
+        // preset is made.
+        var text = NSColor.labelColor
         effectiveAppearance.performAsCurrentDrawingAppearance {   // resolve now; the pull-down dims its title otherwise
-            grey = NSColor(cgColor: NSColor.secondaryLabelColor.cgColor) ?? grey
             text = NSColor(cgColor: NSColor.labelColor.cgColor) ?? text
         }
-        let title = NSMutableAttributedString(string: "PRESET", attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: grey])
-        title.append(NSAttributedString(string: "   " + currentName, attributes: [
-            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: text]))
+        let isDefault = currentName == "Default"
+        let title = NSAttributedString(string: isDefault ? "Presets" : currentName, attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: text])
         presetMenu.item(at: 0)?.attributedTitle = title
         presetMenu.setAccessibilityValue(currentName)
     }
