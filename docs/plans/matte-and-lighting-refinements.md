@@ -1,6 +1,6 @@
 # Plan: matte and lighting refinements
 
-Status: 14 October 2026. Proposed, nothing built. This follows the person-matting plan and extends the Lighting group.
+Status: 14 October 2026. Milestones 1 to 4 are built on the `matte-lighting` branch: coverage wrap, squared min-mask weighting, ghost suppression and uncertainty-weighted Stabilize for Background Removal, point lights with falloff, the luma-preserving tint with a linear-light Highlights gain and an albedo proxy, and Exposure with Auto. Milestone 5 (the work-resolution trial) is not done. This follows the person-matting plan and extends the Lighting group.
 
 ## Why
 
