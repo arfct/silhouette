@@ -230,6 +230,7 @@ final class ControlsView: NSView {
     /// Apple Chromakey was chosen: explain the Video Effects setup.
     var onAppleChromakey: (() -> Void)?
     var onTemperatureAuto: ((Bool) -> Void)?
+    var onExposureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -284,6 +285,8 @@ final class ControlsView: NSView {
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
     private let temperatureAutoSwitch = NSButton()
+    private let exposureAutoSwitch = NSButton()
+    private var exposureCell: NSView!
     private let colorSwitch = NSSwitch()
     /// Foreground blend modes, in the shader's order; Normal is 0.
     static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
@@ -501,13 +504,31 @@ final class ControlsView: NSView {
         let temperatureRow = NSStackView(views: [temperatureCell, temperatureAutoSwitch])
         temperatureRow.spacing = 8
         temperatureRow.alignment = .bottom   // the button sits level with the slider, not the title
+        exposureAutoSwitch.setButtonType(.pushOnPushOff)
+        exposureAutoSwitch.bezelStyle = .rounded
+        exposureAutoSwitch.controlSize = .small
+        exposureAutoSwitch.title = "Auto"
+        exposureAutoSwitch.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        exposureAutoSwitch.target = self; exposureAutoSwitch.action = #selector(exposureAutoChanged)
+        exposureAutoSwitch.toolTip = "Match the background's brightness: measure your average brightness and the background's, and lift or lower yours toward it. Off, set it yourself. Needs a background layer."
+        exposureAutoSwitch.setContentHuggingPriority(.required, for: .horizontal)
+        let exposureCell = sliderCell("Exposure", \.exposure, -2...2, scale: 1, decimals: 1,
+                                      tip: "Brightness of your image only, in stops. Bright areas are lifted less than shadows, so skin keeps its shape. Layers are not affected.")
+        self.exposureCell = exposureCell
+        let exposureRow = NSStackView(views: [exposureCell, exposureAutoSwitch])
+        exposureRow.spacing = 8
+        exposureRow.alignment = .bottom
         let relightRow = columns([
             sliderCell("Relight", \.relight, 0...1, scale: 100, decimals: 0,
-                       tip: "Lets the background light you: its colour wraps around your edges, and its brightest areas light your head from their direction, following where you face when face tracking is on. Needs a background layer."),
+                       tip: "Lets the background light you: its brightest area on each side becomes a light that falls off with distance, lighting your body as a cylinder and your head as a sphere, following where you face when face tracking is on. Needs a background layer."),
             sliderCell("Highlights", \.highlights, 0...1, scale: 100, decimals: 0,
-                       tip: "How much the relight brightens the lit areas as well as tinting them. 0 keeps your brightness; 100 adds strong highlights."),
+                       tip: "How much the relight adds light as well as tint. 0 keeps your brightness; 100 adds strong highlights, more on skin and light clothing than on dark hair."),
         ])
-        let colorStack = NSStackView(views: [temperatureRow, relightRow])
+        let wrapRow = columns([
+            sliderCell("Wrap", \.wrap, 0...1, scale: 100, decimals: 0,
+                       tip: "Light wrap: lets the background show through your soft edges, so hair and shoulders take on the scene instead of ending in a hard line. Needs a background layer."),
+        ])
+        let colorStack = NSStackView(views: [temperatureRow, exposureRow, relightRow, wrapRow])
         colorStack.orientation = .vertical
         colorStack.alignment = .leading
         colorStack.spacing = 8
@@ -1130,10 +1151,25 @@ final class ControlsView: NSView {
         colorBody.isHidden = !colorOn
         for toggle in [keySwitch, shadowSwitch, colorSwitch, trackSwitch] { toggle.isEnabled = true }
         // Within Color, Auto drives the temperature, so the slider dims while it is on.
-        let manual = temperatureAutoSwitch.state == .off
-        temperatureCell.alphaValue = manual ? 1 : 0.45
-        func enable(_ v: NSView) { (v as? NSControl)?.isEnabled = manual; v.subviews.forEach(enable) }
-        enable(temperatureCell)
+        for (cell, auto) in [(temperatureCell!, temperatureAutoSwitch), (exposureCell!, exposureAutoSwitch)] {
+            let manual = auto.state == .off
+            cell.alphaValue = manual ? 1 : 0.45
+            func enable(_ v: NSView) { (v as? NSControl)?.isEnabled = manual; v.subviews.forEach(enable) }
+            enable(cell)
+        }
+    }
+
+    var exposureAuto: Bool {
+        get { exposureAutoSwitch.state == .on }
+        set { exposureAutoSwitch.state = newValue ? .on : .off; refreshEnabledStates() }
+    }
+    @objc private func exposureAutoChanged() { refreshEnabledStates(); onExposureAuto?(exposureAutoSwitch.state == .on) }
+
+    /// Show the automatic exposure in the slider without treating it as a user change.
+    func showExposure(_ value: Float) {
+        guard let (slider, cell, _, scale, decimals) = cells[\.exposure] else { return }
+        slider.floatValue = value
+        cell.value.stringValue = Self.format(value, scale: scale, decimals: decimals)
     }
 
     var temperatureAuto: Bool {

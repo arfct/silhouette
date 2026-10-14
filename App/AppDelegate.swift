@@ -40,6 +40,7 @@ struct Scene: Codable {
     var foreground = LayerSettings()
     var matteSource: Renderer.MatteSource = .chroma
     var temperatureAuto = false
+    var exposureAuto = false
     var supersample = false
     var trackFace = false
     var faceHighRate = false
@@ -84,19 +85,20 @@ struct Settings: Codable {
     var fileBookmarks: [String: Data] = [:]
     var matteSource: Renderer.MatteSource = .chroma
     var temperatureAuto = false
+    var exposureAuto = false
     /// The layer over the keyed camera. The background keeps its original top-level keys.
     var foreground = LayerSettings()
 
     var scene: Scene {
         get {
             Scene(params: params, cameraID: cameraID, videoBookmark: videoBookmark, background: self[.background], foreground: foreground,
-                  matteSource: matteSource, temperatureAuto: temperatureAuto, supersample: supersample, trackFace: trackFace,
+                  matteSource: matteSource, temperatureAuto: temperatureAuto, exposureAuto: exposureAuto, supersample: supersample, trackFace: trackFace,
                   faceHighRate: faceHighRate, shadowFollowsFace: shadowFollowsFace)
         }
         set {
             params = newValue.params; cameraID = newValue.cameraID; videoBookmark = newValue.videoBookmark
             self[.background] = newValue.background; foreground = newValue.foreground
-            matteSource = newValue.matteSource; temperatureAuto = newValue.temperatureAuto; supersample = newValue.supersample
+            matteSource = newValue.matteSource; temperatureAuto = newValue.temperatureAuto; exposureAuto = newValue.exposureAuto; supersample = newValue.supersample
             trackFace = newValue.trackFace; faceHighRate = newValue.faceHighRate; shadowFollowsFace = newValue.shadowFollowsFace
         }
     }
@@ -154,6 +156,7 @@ struct Settings: Codable {
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
         if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
         temperatureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .temperatureAuto)) ?? false
+        exposureAuto = (try? c.decodeIfPresent(Bool.self, forKey: .exposureAuto)) ?? false
         presets = (try? c.decodeIfPresent([Preset].self, forKey: .presets)) ?? []
         currentPreset = try? c.decodeIfPresent(UUID.self, forKey: .currentPreset)
         recentWebURLs = ((try? c.decodeIfPresent([String].self, forKey: .recentWebURLs)) ?? []).filter {
@@ -302,6 +305,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settings.save()
         }
         renderer.onAutoTemperature = { [weak self] value in self?.controls.showTemperature(value) }
+        renderer.exposureAuto = settings.exposureAuto
+        controls.exposureAuto = settings.exposureAuto
+        controls.onExposureAuto = { [weak self] on in
+            guard let self else { return }
+            settings.exposureAuto = on
+            renderer.exposureAuto = on
+            if !on { controls.apply(params: renderer.keyParams) }   // the value auto settled on stays
+            settings.save()
+        }
+        renderer.onAutoExposure = { [weak self] value in self?.controls.showExposure(value) }
         controls.onOpenVideoEffects = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }
         controls.onSaveGreenImage = { [weak self] in self?.saveGreenImage() }
         controls.onAppleChromakey = { [weak self] in self?.showAppleChromakey() }
@@ -946,6 +959,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controls.matteSource = settings.matteSource.rawValue
         renderer.temperatureAuto = settings.temperatureAuto
         controls.temperatureAuto = settings.temperatureAuto
+        renderer.exposureAuto = settings.exposureAuto
+        controls.exposureAuto = settings.exposureAuto
         renderer.trackingEnabled = settings.trackFace
         faceTracker.isEnabled = settings.trackFace
         controls.trackFace = settings.trackFace
