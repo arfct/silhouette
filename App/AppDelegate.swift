@@ -1246,6 +1246,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
+        // An empty toolbar makes the title bar toolbar-height, which brings the
+        // window buttons down and in, level with the captions beside them.
+        let toolbar = NSToolbar(identifier: "titlebar")
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
         window.isReleasedWhenClosed = false
         window.level = settings.keepOnTop ? .floating : .normal
         window.delegate = self
@@ -1325,8 +1331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             controls.previewButtons.bottomAnchor.constraint(equalTo: previewContent.bottomAnchor, constant: -10),
             previewBox.widthAnchor.constraint(equalTo: previewBox.heightAnchor, multiplier: aspect),
             // Background, Source, Foreground above the preview, each a third of its width.
-            // Captions in the title bar, level with the stats; tiles start where the preview used to.
-            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 12),
+            // Captions in the title bar, centred on the window buttons; the tiles start below them.
+            controls.layerStrip.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 18),
             controls.layerStrip.leadingAnchor.constraint(equalTo: previewBox.leadingAnchor),
             controls.layerStrip.widthAnchor.constraint(equalTo: previewBox.widthAnchor),
             previewBox.topAnchor.constraint(equalTo: controls.layerStrip.bottomAnchor, constant: 10),

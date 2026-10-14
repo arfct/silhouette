@@ -343,7 +343,7 @@ final class ControlsView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 44, left: 12, bottom: 14, right: 12)   // under the traffic lights
+        stack.edgeInsets = NSEdgeInsets(top: 43, left: 12, bottom: 14, right: 12)   // the first box lines up with the tiles below the caption row
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // Virtual camera: status in the header; buttons and help only while not live.
@@ -621,8 +621,8 @@ final class ControlsView: NSView {
             stack.topAnchor.constraint(equalTo: doc.topAnchor),
             stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
             connectedRow.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
-            connectedRow.topAnchor.constraint(equalTo: doc.topAnchor, constant: 14),
-            presetMenu.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 80),   // clear of the traffic lights
+            connectedRow.topAnchor.constraint(equalTo: doc.topAnchor, constant: 18),   // centred on the window buttons
+            presetMenu.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 96),   // clear of the window buttons
             presetMenu.trailingAnchor.constraint(lessThanOrEqualTo: connectedRow.leadingAnchor, constant: -12),
             presetMenu.centerYAnchor.constraint(equalTo: connectedRow.centerYAnchor),
         ])
