@@ -243,14 +243,11 @@ final class ControlsView: NSView {
     var onParam: ((WritableKeyPath<KeyParams, Float>, Float) -> Void)?
     var onPresetSelect: ((UUID) -> Void)?
     var onPresetAdd: (() -> Void)?
-    var onPresetDuplicate: ((UUID) -> Void)?
-    var onPresetRename: ((UUID, String) -> Void)?
+    var onPresetRename: ((UUID) -> Void)?
     var onPresetDelete: ((UUID) -> Void)?
     private var presets: [(id: UUID, name: String)] = []
     private var currentPreset: UUID?
-    private let presetTable = NSTableView()
-    private var presetTableHeight: NSLayoutConstraint!
-    private var settingPresets = false
+    private let presetMenu = NSPopUpButton(frame: .zero, pullsDown: true)
     var onInstall: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPickKey: (() -> Void)?
@@ -310,10 +307,7 @@ final class ControlsView: NSView {
     private var sinkGroup: NSView!
     private var showSinkDetail = false
     /// Title-bar indicator shown while the virtual camera is live; tapping it shows the detail.
-    private let connectedButton = NSButton(title: "Connected", target: nil, action: nil)
-    private let connectedDot = StatusDot()
     private var chromaBody: NSView!
-    private var connectedRow: NSStackView!
     private let offsetValue = ValueField(frame: .zero)
     private let keySwatch = NSButton(title: "", target: nil, action: nil)
     private let keyHint = NSTextField(wrappingLabelWithString: "")
@@ -346,7 +340,7 @@ final class ControlsView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 44, left: 12, bottom: 14, right: 12)   // under the traffic lights
+        stack.edgeInsets = NSEdgeInsets(top: 37, left: 12, bottom: 14, right: 12)   // the first box lines up with the tiles below the caption row
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // Virtual camera: status in the header; buttons and help only while not live.
@@ -363,20 +357,6 @@ final class ControlsView: NSView {
         sinkGroup = group("Virtual camera", trailing: statusRow, rows: [sinkButtons, statusLabel])
         stack.addArrangedSubview(sinkGroup)
 
-        // Title-area indicator (top right of the sidebar), only while live.
-        connectedDot.color = .systemGreen
-        connectedButton.isBordered = false
-        connectedButton.font = .systemFont(ofSize: 11, weight: .medium)
-        connectedButton.contentTintColor = .secondaryLabelColor
-        connectedButton.target = self
-        connectedButton.action = #selector(connectedTapped)
-        connectedButton.toolTip = "The virtual camera is live. Click for details."
-        let connectedRow = NSStackView(views: [connectedDot, connectedButton])
-        connectedRow.spacing = 5
-        connectedRow.translatesAutoresizingMaskIntoConstraints = false
-        connectedRow.identifier = NSUserInterfaceItemIdentifier("connectedRow")
-        connectedRow.isHidden = true
-        self.connectedRow = connectedRow
 
         trackSwitch.target = self; trackSwitch.action = #selector(trackChanged)
 
@@ -454,35 +434,16 @@ final class ControlsView: NSView {
         keyRange.setAccessibilityElement(true)
         keyRange.setAccessibilityRole(.slider)
         keyRange.setAccessibilityLabel("Color Range")
-        // Presets: a list at the top; the selected one absorbs every change below it.
-        let addPreset = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New preset")!, target: self, action: #selector(presetAddTapped))
-        addPreset.bezelStyle = .accessoryBarAction
-        addPreset.isBordered = false
-        addPreset.toolTip = "New preset from the current settings"
-        presetTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")))
-        presetTable.headerView = nil
-        presetTable.rowHeight = 22
-        presetTable.intercellSpacing = NSSize(width: 0, height: 2)
-        presetTable.style = .plain
-        presetTable.selectionHighlightStyle = .regular
-        presetTable.allowsEmptySelection = false
-        presetTable.backgroundColor = .clear
-        presetTable.dataSource = self
-        presetTable.delegate = self
-        presetTable.target = self
-        presetTable.doubleAction = #selector(presetDoubleClicked)
-        presetTable.menu = NSMenu()
-        presetTable.menu?.delegate = self
-        presetTable.toolTip = "Presets. Click to switch; every change is kept in the selected one. Double-click to rename, right-click for more."
-        let presetScroll = NSScrollView()
-        presetScroll.documentView = presetTable
-        presetScroll.drawsBackground = false
-        presetScroll.hasVerticalScroller = true
-        presetScroll.autohidesScrollers = true
-        presetScroll.translatesAutoresizingMaskIntoConstraints = false
-        presetTableHeight = presetScroll.heightAnchor.constraint(equalToConstant: 24)
-        presetTableHeight.isActive = true
-        stack.addArrangedSubview(group("Presets", trailing: addPreset, rows: [presetScroll], tip: "Saved scenes: source, layers, key, lighting, shadow, and tracking. The selected preset keeps every change you make."))
+        // Presets: a text-only pull-down in the title bar, after the traffic
+        // lights, showing the current preset's name. Every change is kept in
+        // the current preset.
+        presetMenu.translatesAutoresizingMaskIntoConstraints = false
+        presetMenu.isBordered = false
+        presetMenu.addItem(withTitle: "")   // the pull-down's title, set in setPresets
+        presetMenu.toolTip = "The current preset. Every change is kept in it. Choose another to switch, or make, rename, or delete one from the menu."
+        presetMenu.setAccessibilityLabel("Preset")
+        presetMenu.setContentHuggingPriority(.required, for: .horizontal)
+        presetMenu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Chromakey: the title is a pull-down for the matte, the swatch sits at
         // its left, Auto sits beside the Color Range.
@@ -628,7 +589,7 @@ final class ControlsView: NSView {
         let doc = FlippedView()
         doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(stack)
-        doc.addSubview(connectedRow)   // in the document, so it scrolls with the groups
+        doc.addSubview(presetMenu)   // in the document, so it scrolls with the groups
         scroll.documentView = doc
         addSubview(scroll)
         NSLayoutConstraint.activate([
@@ -641,8 +602,11 @@ final class ControlsView: NSView {
             stack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
             stack.topAnchor.constraint(equalTo: doc.topAnchor),
             stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
-            connectedRow.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
-            connectedRow.topAnchor.constraint(equalTo: doc.topAnchor, constant: 14),
+            // Right-aligned in the sidebar's title area, clear of the window
+            // buttons, centred in the space above the first box.
+            presetMenu.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
+            presetMenu.leadingAnchor.constraint(greaterThanOrEqualTo: doc.leadingAnchor, constant: 96),
+            presetMenu.topAnchor.constraint(equalTo: doc.topAnchor, constant: 12),
         ])
         for v in stack.arrangedSubviews { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true }
         updateSinkVisibility()
@@ -797,7 +761,6 @@ final class ControlsView: NSView {
         statusLabel.isHidden = sinkConnected || statusLabel.stringValue.isEmpty
         if !sinkConnected { showSinkDetail = false }
         sinkGroup?.isHidden = sinkConnected && !showSinkDetail
-        connectedRow?.isHidden = !sinkConnected
     }
 
 
@@ -974,31 +937,50 @@ final class ControlsView: NSView {
     func setPresets(_ list: [(UUID, String)], current: UUID?) {
         presets = list.map { (id: $0.0, name: $0.1) }
         currentPreset = current
-        settingPresets = true
-        presetTable.reloadData()
-        if let row = presets.firstIndex(where: { $0.id == current }) { presetTable.selectRowIndexes([row], byExtendingSelection: false) }
-        settingPresets = false
-        let rows = max(presets.count, 1)
-        presetTableHeight.constant = CGFloat(min(rows, 6)) * (presetTable.rowHeight + presetTable.intercellSpacing.height) + 2
+        let currentName = presets.first { $0.id == current }?.name ?? "Default"
+        while presetMenu.numberOfItems > 1 { presetMenu.removeItem(at: 1) }
+        for preset in presets {
+            presetMenu.addItem(withTitle: preset.name)
+            presetMenu.lastItem?.representedObject = preset.id
+            presetMenu.lastItem?.state = preset.id == current ? .on : .off
+            presetMenu.lastItem?.target = self
+            presetMenu.lastItem?.action = #selector(presetChosen(_:))
+        }
+        presetMenu.menu?.addItem(.separator())
+        for (title, tag, tip) in [("New Preset…", 1, "A new preset from the current settings."),
+                                  ("Rename Preset…", 2, "Renames the current preset."),
+                                  ("Delete “\(currentName)”…", 3, "Removes the current preset after asking.")] {
+            presetMenu.addItem(withTitle: title)
+            presetMenu.lastItem?.tag = tag
+            presetMenu.lastItem?.toolTip = tip
+            presetMenu.lastItem?.target = self
+            presetMenu.lastItem?.action = #selector(presetChosen(_:))
+        }
+        // The title is the preset's name, as the tiles show their choice. The
+        // Default preset reads "Presets", so the menu names itself until a
+        // preset is made.
+        var text = NSColor.labelColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {   // resolve now; the pull-down dims its title otherwise
+            text = NSColor(cgColor: NSColor.labelColor.cgColor) ?? text
+        }
+        let isDefault = currentName == "Default"
+        let title = NSAttributedString(string: isDefault ? "Presets" : currentName, attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: text])
+        presetMenu.item(at: 0)?.attributedTitle = title
+        presetMenu.setAccessibilityValue(currentName)
     }
 
-    func beginRenamingPreset(_ id: UUID) {
-        guard let row = presets.firstIndex(where: { $0.id == id }) else { return }
-        presetTable.editColumn(0, row: row, with: nil, select: true)
-    }
-
-    @objc private func presetAddTapped() { onPresetAdd?() }
-    @objc private func presetDoubleClicked() {
-        let row = presetTable.clickedRow
-        if row >= 0 { presetTable.editColumn(0, row: row, with: nil, select: true) }
-    }
-    @objc private func presetRenameMenu() { if presetTable.clickedRow >= 0 { presetTable.editColumn(0, row: presetTable.clickedRow, with: nil, select: true) } }
-    @objc private func presetDuplicateMenu() { if presetTable.clickedRow >= 0 { onPresetDuplicate?(presets[presetTable.clickedRow].id) } }
-    @objc private func presetDeleteMenu() { if presetTable.clickedRow >= 0 { onPresetDelete?(presets[presetTable.clickedRow].id) } }
-    @objc private func presetNameEdited(_ sender: NSTextField) {
-        let row = presetTable.row(for: sender)
-        guard row >= 0 else { return }
-        onPresetRename?(presets[row].id, sender.stringValue)
+    @objc private func presetChosen(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? UUID {
+            if id != currentPreset { onPresetSelect?(id) }
+            return
+        }
+        switch sender.tag {
+        case 1: onPresetAdd?()
+        case 2: if let id = currentPreset { onPresetRename?(id) }
+        case 3: if let id = currentPreset { onPresetDelete?(id) }
+        default: break
+        }
     }
 
     @objc private func sourceTapped() { showSourcePicker() }
@@ -1272,10 +1254,6 @@ final class ControlsView: NSView {
         }
     }
 
-    @objc private func connectedTapped() {
-        showSinkDetail.toggle()
-        sinkGroup.isHidden = !showSinkDetail
-    }
 
 
     /// Route a committed combo value: a fixed item, a colour, a file path, or a URL.
@@ -1324,50 +1302,3 @@ final class StatusDot: NSView {
     }
 }
 
-extension ControlsView: NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int { presets.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("presetCell")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let c = NSTableCellView()
-            c.identifier = id
-            let field = NSTextField(string: "")
-            field.isBordered = false
-            field.drawsBackground = false
-            field.isEditable = true
-            field.font = .systemFont(ofSize: 12)
-            field.lineBreakMode = .byTruncatingTail
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.target = self
-            field.action = #selector(presetNameEdited(_:))
-            c.addSubview(field)
-            c.textField = field
-            NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
-                field.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
-                field.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-            ])
-            return c
-        }()
-        cell.textField?.stringValue = presets[row].name
-        cell.textField?.setAccessibilityLabel(presets[row].name)
-        return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !settingPresets, presetTable.selectedRow >= 0 else { return }
-        let id = presets[presetTable.selectedRow].id
-        if id != currentPreset { onPresetSelect?(id) }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === presetTable.menu else { return }
-        menu.removeAllItems()
-        guard presetTable.clickedRow >= 0 else { return }
-        menu.addItem(withTitle: "Rename", action: #selector(presetRenameMenu), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Duplicate", action: #selector(presetDuplicateMenu), keyEquivalent: "").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Delete", action: #selector(presetDeleteMenu), keyEquivalent: "").target = self
-    }
-}
