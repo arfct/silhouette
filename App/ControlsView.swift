@@ -243,14 +243,11 @@ final class ControlsView: NSView {
     var onParam: ((WritableKeyPath<KeyParams, Float>, Float) -> Void)?
     var onPresetSelect: ((UUID) -> Void)?
     var onPresetAdd: (() -> Void)?
-    var onPresetDuplicate: ((UUID) -> Void)?
-    var onPresetRename: ((UUID, String) -> Void)?
+    var onPresetRename: ((UUID) -> Void)?
     var onPresetDelete: ((UUID) -> Void)?
     private var presets: [(id: UUID, name: String)] = []
     private var currentPreset: UUID?
-    private let presetTable = NSTableView()
-    private var presetTableHeight: NSLayoutConstraint!
-    private var settingPresets = false
+    private let presetMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     var onInstall: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPickKey: (() -> Void)?
@@ -454,35 +451,16 @@ final class ControlsView: NSView {
         keyRange.setAccessibilityElement(true)
         keyRange.setAccessibilityRole(.slider)
         keyRange.setAccessibilityLabel("Color Range")
-        // Presets: a list at the top; the selected one absorbs every change below it.
-        let addPreset = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New preset")!, target: self, action: #selector(presetAddTapped))
-        addPreset.bezelStyle = .accessoryBarAction
-        addPreset.isBordered = false
-        addPreset.toolTip = "New preset from the current settings"
-        presetTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")))
-        presetTable.headerView = nil
-        presetTable.rowHeight = 22
-        presetTable.intercellSpacing = NSSize(width: 0, height: 2)
-        presetTable.style = .plain
-        presetTable.selectionHighlightStyle = .regular
-        presetTable.allowsEmptySelection = false
-        presetTable.backgroundColor = .clear
-        presetTable.dataSource = self
-        presetTable.delegate = self
-        presetTable.target = self
-        presetTable.doubleAction = #selector(presetDoubleClicked)
-        presetTable.menu = NSMenu()
-        presetTable.menu?.delegate = self
-        presetTable.toolTip = "Presets. Click to switch; every change is kept in the selected one. Double-click to rename, right-click for more."
-        let presetScroll = NSScrollView()
-        presetScroll.documentView = presetTable
-        presetScroll.drawsBackground = false
-        presetScroll.hasVerticalScroller = true
-        presetScroll.autohidesScrollers = true
-        presetScroll.translatesAutoresizingMaskIntoConstraints = false
-        presetTableHeight = presetScroll.heightAnchor.constraint(equalToConstant: 24)
-        presetTableHeight.isActive = true
-        stack.addArrangedSubview(group("Presets", trailing: addPreset, rows: [presetScroll], tip: "Saved scenes: source, layers, key, lighting, shadow, and tracking. The selected preset keeps every change you make."))
+        // Presets: a pop-up at the top showing the current one; every change
+        // below it is kept in that preset.
+        presetMenu.translatesAutoresizingMaskIntoConstraints = false
+        presetMenu.controlSize = .small
+        presetMenu.font = .systemFont(ofSize: 12)
+        presetMenu.target = self
+        presetMenu.action = #selector(presetMenuChanged(_:))
+        presetMenu.toolTip = "The current preset. Every change is kept in it. Choose another to switch, or make, rename, or delete one from the menu."
+        presetMenu.setAccessibilityLabel("Preset")
+        stack.addArrangedSubview(group("Presets", trailing: nil, rows: [presetMenu], tip: "Saved scenes: source, layers, key, lighting, shadow, and tracking. The selected preset keeps every change you make."))
 
         // Chromakey: the title is a pull-down for the matte, the swatch sits at
         // its left, Auto sits beside the Color Range.
@@ -974,31 +952,42 @@ final class ControlsView: NSView {
     func setPresets(_ list: [(UUID, String)], current: UUID?) {
         presets = list.map { (id: $0.0, name: $0.1) }
         currentPreset = current
-        settingPresets = true
-        presetTable.reloadData()
-        if let row = presets.firstIndex(where: { $0.id == current }) { presetTable.selectRowIndexes([row], byExtendingSelection: false) }
-        settingPresets = false
-        let rows = max(presets.count, 1)
-        presetTableHeight.constant = CGFloat(min(rows, 6)) * (presetTable.rowHeight + presetTable.intercellSpacing.height) + 2
+        presetMenu.removeAllItems()
+        for preset in presets {
+            presetMenu.addItem(withTitle: preset.name)
+            presetMenu.lastItem?.representedObject = preset.id
+        }
+        presetMenu.menu?.addItem(.separator())
+        presetMenu.addItem(withTitle: "New Preset…")
+        presetMenu.lastItem?.tag = 1
+        presetMenu.lastItem?.toolTip = "A new preset from the current settings."
+        presetMenu.addItem(withTitle: "Rename Preset…")
+        presetMenu.lastItem?.tag = 2
+        let currentName = presets.first { $0.id == current }?.name ?? "Preset"
+        presetMenu.addItem(withTitle: "Delete “\(currentName)”…")
+        presetMenu.lastItem?.tag = 3
+        selectCurrentPreset()
     }
 
-    func beginRenamingPreset(_ id: UUID) {
-        guard let row = presets.firstIndex(where: { $0.id == id }) else { return }
-        presetTable.editColumn(0, row: row, with: nil, select: true)
+    private func selectCurrentPreset() {
+        if let i = presets.firstIndex(where: { $0.id == currentPreset }) { presetMenu.selectItem(at: i) }
+        presetMenu.setAccessibilityValue(presetMenu.titleOfSelectedItem ?? "")
     }
 
-    @objc private func presetAddTapped() { onPresetAdd?() }
-    @objc private func presetDoubleClicked() {
-        let row = presetTable.clickedRow
-        if row >= 0 { presetTable.editColumn(0, row: row, with: nil, select: true) }
-    }
-    @objc private func presetRenameMenu() { if presetTable.clickedRow >= 0 { presetTable.editColumn(0, row: presetTable.clickedRow, with: nil, select: true) } }
-    @objc private func presetDuplicateMenu() { if presetTable.clickedRow >= 0 { onPresetDuplicate?(presets[presetTable.clickedRow].id) } }
-    @objc private func presetDeleteMenu() { if presetTable.clickedRow >= 0 { onPresetDelete?(presets[presetTable.clickedRow].id) } }
-    @objc private func presetNameEdited(_ sender: NSTextField) {
-        let row = presetTable.row(for: sender)
-        guard row >= 0 else { return }
-        onPresetRename?(presets[row].id, sender.stringValue)
+    @objc private func presetMenuChanged(_ sender: NSPopUpButton) {
+        let chosen = sender.selectedItem
+        selectCurrentPreset()   // the button keeps showing the current preset, whatever was chosen
+        guard let chosen else { return }
+        if let id = chosen.representedObject as? UUID {
+            if id != currentPreset { onPresetSelect?(id) }
+            return
+        }
+        switch chosen.tag {
+        case 1: onPresetAdd?()
+        case 2: if let id = currentPreset { onPresetRename?(id) }
+        case 3: if let id = currentPreset { onPresetDelete?(id) }
+        default: break
+        }
     }
 
     @objc private func sourceTapped() { showSourcePicker() }
@@ -1324,50 +1313,3 @@ final class StatusDot: NSView {
     }
 }
 
-extension ControlsView: NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int { presets.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("presetCell")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let c = NSTableCellView()
-            c.identifier = id
-            let field = NSTextField(string: "")
-            field.isBordered = false
-            field.drawsBackground = false
-            field.isEditable = true
-            field.font = .systemFont(ofSize: 12)
-            field.lineBreakMode = .byTruncatingTail
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.target = self
-            field.action = #selector(presetNameEdited(_:))
-            c.addSubview(field)
-            c.textField = field
-            NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
-                field.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
-                field.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-            ])
-            return c
-        }()
-        cell.textField?.stringValue = presets[row].name
-        cell.textField?.setAccessibilityLabel(presets[row].name)
-        return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !settingPresets, presetTable.selectedRow >= 0 else { return }
-        let id = presets[presetTable.selectedRow].id
-        if id != currentPreset { onPresetSelect?(id) }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === presetTable.menu else { return }
-        menu.removeAllItems()
-        guard presetTable.clickedRow >= 0 else { return }
-        menu.addItem(withTitle: "Rename", action: #selector(presetRenameMenu), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Duplicate", action: #selector(presetDuplicateMenu), keyEquivalent: "").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Delete", action: #selector(presetDeleteMenu), keyEquivalent: "").target = self
-    }
-}

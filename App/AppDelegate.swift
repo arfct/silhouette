@@ -356,8 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateTrackingNeeds()
         controls.onPresetSelect = { [weak self] id in self?.selectPreset(id) }
         controls.onPresetAdd = { [weak self] in self?.addPreset() }
-        controls.onPresetDuplicate = { [weak self] id in self?.addPreset(duplicating: id) }
-        controls.onPresetRename = { [weak self] id, name in self?.renamePreset(id, to: name) }
+        controls.onPresetRename = { [weak self] id in self?.renamePreset(id) }
         controls.onPresetDelete = { [weak self] id in self?.deletePreset(id) }
         refreshPresetViews()
         controls.apply(params: renderer.keyParams)
@@ -790,30 +789,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refreshPresetViews()
     }
 
-    /// A new preset from the current scene (or another preset's), selected and ready to name.
+    /// Asks for a name, then makes a preset from the current scene (or another
+    /// preset's) and selects it.
     private func addPreset(duplicating source: UUID? = nil) {
-        settings.save()
         let base = source.flatMap { s in settings.presets.first { $0.id == s } }
-        let name = uniquePresetName(base.map { $0.name + " copy" } ?? "Preset \(settings.presets.count + 1)")
-        let preset = Preset(id: UUID(), name: name, scene: base?.scene ?? settings.scene)
-        settings.presets.append(preset)
-        let changes = base != nil && base!.id != settings.currentPreset
-        settings.currentPreset = preset.id
-        if changes { settings.scene = preset.scene; applyScene() }
-        settings.save()
-        refreshPresetViews()
-        controls.beginRenamingPreset(preset.id)
+        let suggested = uniquePresetName(base.map { $0.name + " copy" } ?? "Preset \(settings.presets.count + 1)")
+        askPresetName(title: "New Preset", prompt: "Name the preset. The current settings go into it, and every change you make is kept there.", initial: suggested, button: "Create") { [weak self] name in
+            guard let self else { return }
+            settings.save()
+            let preset = Preset(id: UUID(), name: uniquePresetName(name), scene: base?.scene ?? settings.scene)
+            settings.presets.append(preset)
+            let changes = base != nil && base!.id != settings.currentPreset
+            settings.currentPreset = preset.id
+            if changes { settings.scene = preset.scene; applyScene() }
+            settings.save()
+            refreshPresetViews()
+        }
     }
 
-    private func renamePreset(_ id: UUID, to name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let i = settings.presets.firstIndex(where: { $0.id == id }) else { refreshPresetViews(); return }
-        settings.presets[i].name = trimmed
-        settings.save()
-        refreshPresetViews()
+    private func renamePreset(_ id: UUID) {
+        guard let i = settings.presets.firstIndex(where: { $0.id == id }) else { return }
+        askPresetName(title: "Rename Preset", prompt: nil, initial: settings.presets[i].name, button: "Rename") { [weak self] name in
+            guard let self, let i = settings.presets.firstIndex(where: { $0.id == id }) else { return }
+            settings.presets[i].name = name
+            settings.save()
+            refreshPresetViews()
+        }
     }
 
+    /// A sheet with one text field. The completion runs only with a non-empty name.
+    private func askPresetName(title: String, prompt: String?, initial: String, button: String, completion: @escaping (String) -> Void) {
+        if !windowOpen { showMainWindow() }
+        let alert = NSAlert()
+        alert.messageText = title
+        if let prompt { alert.informativeText = prompt }
+        let field = NSTextField(string: initial)
+        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        field.placeholderString = "Name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty { completion(name) }
+        }
+    }
+
+    /// Confirms, then removes the preset. Deleting the current one moves to its
+    /// neighbour; deleting the last starts a fresh Default from the live scene.
     private func deletePreset(_ id: UUID) {
+        guard let preset = settings.presets.first(where: { $0.id == id }) else { return }
+        if !windowOpen { showMainWindow() }
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(preset.name)”?"
+        alert.informativeText = settings.presets.count == 1
+            ? "This is the only preset. Its settings stay as a new Default."
+            : "Its settings are lost. This cannot be undone."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            removePreset(id)
+        }
+    }
+
+    private func removePreset(_ id: UUID) {
         guard let i = settings.presets.firstIndex(where: { $0.id == id }) else { return }
         settings.presets.remove(at: i)
         if settings.currentPreset == id {
@@ -1582,10 +1625,10 @@ extension AppDelegate {
             presetsMenu.addItem(item)
         }
         presetsMenu.addItem(.separator())
-        presetsMenu.addItem(withTitle: "New Preset", action: #selector(newPresetMenu), keyEquivalent: "n").target = self
-        presetsMenu.addItem(withTitle: "Duplicate Preset", action: #selector(duplicatePresetMenu), keyEquivalent: "").target = self
+        presetsMenu.addItem(withTitle: "New Preset…", action: #selector(newPresetMenu), keyEquivalent: "n").target = self
+        presetsMenu.addItem(withTitle: "Duplicate Preset…", action: #selector(duplicatePresetMenu), keyEquivalent: "").target = self
         presetsMenu.addItem(withTitle: "Rename Preset…", action: #selector(renamePresetMenu), keyEquivalent: "").target = self
-        presetsMenu.addItem(withTitle: "Delete Preset", action: #selector(deletePresetMenu), keyEquivalent: "").target = self
+        presetsMenu.addItem(withTitle: "Delete Preset…", action: #selector(deletePresetMenu), keyEquivalent: "").target = self
     }
 
     @objc fileprivate func presetMenuChosen(_ sender: NSMenuItem) {
@@ -1593,9 +1636,6 @@ extension AppDelegate {
     }
     @objc fileprivate func newPresetMenu() { addPreset() }
     @objc fileprivate func duplicatePresetMenu() { if let id = settings.currentPreset { addPreset(duplicating: id) } }
-    @objc fileprivate func renamePresetMenu() {
-        if !windowOpen { showMainWindow() }
-        if let id = settings.currentPreset { controls.beginRenamingPreset(id) }
-    }
+    @objc fileprivate func renamePresetMenu() { if let id = settings.currentPreset { renamePreset(id) } }
     @objc fileprivate func deletePresetMenu() { if let id = settings.currentPreset { deletePreset(id) } }
 }
