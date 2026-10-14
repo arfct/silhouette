@@ -375,10 +375,15 @@ private final class PickerViewController: NSViewController, NSTextFieldDelegate 
                 let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: add.tooltip)!, target: self, action: #selector(addTapped(_:)))
                 plus.bezelStyle = .accessoryBarAction
                 plus.isBordered = false
-                plus.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
-                plus.contentTintColor = .controlAccentColor
+                plus.symbolConfiguration = .init(pointSize: 17, weight: .bold)
+                plus.contentTintColor = .white   // the window is always dark
                 plus.toolTip = add.tooltip
                 plus.tag = index
+                plus.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([   // a target worth hitting, not just the glyph
+                    plus.widthAnchor.constraint(equalToConstant: 30),
+                    plus.heightAnchor.constraint(equalToConstant: 30),
+                ])
                 headerViews.append(plus)
             }
             let headerRow = NSStackView(views: headerViews)
