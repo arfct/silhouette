@@ -247,7 +247,7 @@ final class ControlsView: NSView {
     var onPresetDelete: ((UUID) -> Void)?
     private var presets: [(id: UUID, name: String)] = []
     private var currentPreset: UUID?
-    private let presetMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let presetMenu = NSPopUpButton(frame: .zero, pullsDown: true)
     var onInstall: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onPickKey: (() -> Void)?
@@ -451,16 +451,16 @@ final class ControlsView: NSView {
         keyRange.setAccessibilityElement(true)
         keyRange.setAccessibilityRole(.slider)
         keyRange.setAccessibilityLabel("Color Range")
-        // Presets: a pop-up at the top showing the current one; every change
-        // below it is kept in that preset.
+        // Presets: a text-only pull-down in the title bar, after the traffic
+        // lights, in the tile captions' style. Every change is kept in the
+        // current preset.
         presetMenu.translatesAutoresizingMaskIntoConstraints = false
-        presetMenu.controlSize = .small
-        presetMenu.font = .systemFont(ofSize: 12)
-        presetMenu.target = self
-        presetMenu.action = #selector(presetMenuChanged(_:))
+        presetMenu.isBordered = false
+        presetMenu.addItem(withTitle: "")   // the pull-down's title, set in setPresets
         presetMenu.toolTip = "The current preset. Every change is kept in it. Choose another to switch, or make, rename, or delete one from the menu."
         presetMenu.setAccessibilityLabel("Preset")
-        stack.addArrangedSubview(group("Presets", trailing: nil, rows: [presetMenu], tip: "Saved scenes: source, layers, key, lighting, shadow, and tracking. The selected preset keeps every change you make."))
+        presetMenu.setContentHuggingPriority(.required, for: .horizontal)
+        presetMenu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Chromakey: the title is a pull-down for the matte, the swatch sits at
         // its left, Auto sits beside the Color Range.
@@ -607,6 +607,7 @@ final class ControlsView: NSView {
         doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(stack)
         doc.addSubview(connectedRow)   // in the document, so it scrolls with the groups
+        doc.addSubview(presetMenu)
         scroll.documentView = doc
         addSubview(scroll)
         NSLayoutConstraint.activate([
@@ -621,6 +622,9 @@ final class ControlsView: NSView {
             stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
             connectedRow.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -16),
             connectedRow.topAnchor.constraint(equalTo: doc.topAnchor, constant: 14),
+            presetMenu.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 80),   // clear of the traffic lights
+            presetMenu.trailingAnchor.constraint(lessThanOrEqualTo: connectedRow.leadingAnchor, constant: -12),
+            presetMenu.centerYAnchor.constraint(equalTo: connectedRow.centerYAnchor),
         ])
         for v in stack.arrangedSubviews { v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true }
         updateSinkVisibility()
@@ -952,37 +956,45 @@ final class ControlsView: NSView {
     func setPresets(_ list: [(UUID, String)], current: UUID?) {
         presets = list.map { (id: $0.0, name: $0.1) }
         currentPreset = current
-        presetMenu.removeAllItems()
+        let currentName = presets.first { $0.id == current }?.name ?? "Default"
+        while presetMenu.numberOfItems > 1 { presetMenu.removeItem(at: 1) }
         for preset in presets {
             presetMenu.addItem(withTitle: preset.name)
             presetMenu.lastItem?.representedObject = preset.id
+            presetMenu.lastItem?.state = preset.id == current ? .on : .off
+            presetMenu.lastItem?.target = self
+            presetMenu.lastItem?.action = #selector(presetChosen(_:))
         }
         presetMenu.menu?.addItem(.separator())
-        presetMenu.addItem(withTitle: "New Preset…")
-        presetMenu.lastItem?.tag = 1
-        presetMenu.lastItem?.toolTip = "A new preset from the current settings."
-        presetMenu.addItem(withTitle: "Rename Preset…")
-        presetMenu.lastItem?.tag = 2
-        let currentName = presets.first { $0.id == current }?.name ?? "Preset"
-        presetMenu.addItem(withTitle: "Delete “\(currentName)”…")
-        presetMenu.lastItem?.tag = 3
-        selectCurrentPreset()
+        for (title, tag, tip) in [("New Preset…", 1, "A new preset from the current settings."),
+                                  ("Rename Preset…", 2, "Renames the current preset."),
+                                  ("Delete “\(currentName)”…", 3, "Removes the current preset after asking.")] {
+            presetMenu.addItem(withTitle: title)
+            presetMenu.lastItem?.tag = tag
+            presetMenu.lastItem?.toolTip = tip
+            presetMenu.lastItem?.target = self
+            presetMenu.lastItem?.action = #selector(presetChosen(_:))
+        }
+        // The title: PRESET in the captions' grey, then the name, as the tiles show theirs.
+        var grey = NSColor.secondaryLabelColor, text = NSColor.labelColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {   // resolve now; the pull-down dims its title otherwise
+            grey = NSColor(cgColor: NSColor.secondaryLabelColor.cgColor) ?? grey
+            text = NSColor(cgColor: NSColor.labelColor.cgColor) ?? text
+        }
+        let title = NSMutableAttributedString(string: "PRESET", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: grey])
+        title.append(NSAttributedString(string: "   " + currentName, attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: text]))
+        presetMenu.item(at: 0)?.attributedTitle = title
+        presetMenu.setAccessibilityValue(currentName)
     }
 
-    private func selectCurrentPreset() {
-        if let i = presets.firstIndex(where: { $0.id == currentPreset }) { presetMenu.selectItem(at: i) }
-        presetMenu.setAccessibilityValue(presetMenu.titleOfSelectedItem ?? "")
-    }
-
-    @objc private func presetMenuChanged(_ sender: NSPopUpButton) {
-        let chosen = sender.selectedItem
-        selectCurrentPreset()   // the button keeps showing the current preset, whatever was chosen
-        guard let chosen else { return }
-        if let id = chosen.representedObject as? UUID {
+    @objc private func presetChosen(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? UUID {
             if id != currentPreset { onPresetSelect?(id) }
             return
         }
-        switch chosen.tag {
+        switch sender.tag {
         case 1: onPresetAdd?()
         case 2: if let id = currentPreset { onPresetRename?(id) }
         case 3: if let id = currentPreset { onPresetDelete?(id) }
