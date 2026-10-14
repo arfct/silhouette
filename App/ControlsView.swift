@@ -1296,7 +1296,7 @@ final class ControlsView: NSView {
     @objc private func mirrorChanged() { mirrorButton.isOn.toggle(); onMirrorPreview?(mirrorButton.isOn) }
 
     /// The Source tile shows a still from the live source: one soon after a
-    /// switch, once frames are flowing, then a fresh one every few seconds
+    /// switch, once frames are flowing, then a fresh one every minute
     /// while the window is visible. A small picture, so the cost is nothing.
     private var sourceThumbnailTimer: Timer?
     private func scheduleSourceThumbnail() {
@@ -1307,7 +1307,7 @@ final class ControlsView: NSView {
         for delay in [1.5, 3.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refreshSourceThumbnail() }
         }
-        sourceThumbnailTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.refreshSourceThumbnail() }
+        sourceThumbnailTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshSourceThumbnail() }
     }
 
     private func refreshSourceThumbnail() {
