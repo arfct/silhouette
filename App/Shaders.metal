@@ -39,6 +39,7 @@ struct KeyParams {
     float4 light1;
     float4 light1Color;
     float  fgBlend;        // foreground blend mode: 0 normal, else see blendForeground
+    float  exposure;       // exposure of the subject in stops, a gain in linear light
 };
 
 struct VSOut {
@@ -62,6 +63,21 @@ static inline float2 fullRangeChroma(float2 cbcr, constant KeyParams &P) {
 }
 static inline float fullRangeLuma(float y, constant KeyParams &P) {
     return P.videoRange > 0.5 ? saturate((y - 16.0 / 255.0) * (255.0 / 219.0)) : y;
+}
+
+static inline float3 srgbToLinear(float3 c) {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+static inline float3 linearToSrgb(float3 c) {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
+}
+
+// How unsure a matte value is: about 1 at 0.5, about 0 near 0 and 1. A
+// polynomial fit of 1 - (1 - H(p))^2 with H the binary entropy, so temporal
+// smoothing lands on the transition band and leaves confident pixels alone.
+static inline float matteUncertainty(float p) {
+    float t = p - 0.5, x = t * t;
+    return 1.0 - min(1.0, x * (5.68842 + x * (-0.748699 + x * (-57.8051 + x * (291.309 + x * -624.717)))));
 }
 
 static inline float matte(float2 cbcr, constant KeyParams &P) {
@@ -117,6 +133,39 @@ static inline float personAlpha(float2 cuv, texture2d<float> lumaTex, texture2d<
     float dBg = length((I - bgMean) * weight);
     float byColor = smoothstep(0.3, 0.7, dBg / max(dFg + dBg, 1e-4));
     return guided * byColor;
+}
+
+// Ghost suppression on the coarse person mask: a pixel keeps its value only
+// where enough of its 5×5 neighbourhood is confidently inside. Isolated specks
+// and one-pixel strands the model hallucinated go; real edges, with dense
+// support, stay. Two separable passes.
+kernel void ghostVertical(texture2d<float, access::read> mask [[texture(0)]],
+                          texture2d<float, access::write> out [[texture(1)]],
+                          uint2 gid [[thread_position_in_grid]])
+{
+    uint w = out.get_width(), h = out.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+    float count = 0.0;
+    for (int i = -2; i <= 2; i++) {
+        uint y = uint(clamp(int(gid.y) + i, 0, int(h) - 1));
+        count += step(0.5, mask.read(uint2(gid.x, y)).r);
+    }
+    out.write(count / 5.0, gid);
+}
+
+kernel void ghostHorizontal(texture2d<float, access::read> counts [[texture(0)]],
+                            texture2d<float, access::read> mask [[texture(1)]],
+                            texture2d<float, access::write> out [[texture(2)]],
+                            uint2 gid [[thread_position_in_grid]])
+{
+    uint w = out.get_width(), h = out.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+    float coverage = 0.0;
+    for (int j = -2; j <= 2; j++) {
+        uint x = uint(clamp(int(gid.x) + j, 0, int(w) - 1));
+        coverage += counts.read(uint2(x, gid.y)).r;
+    }
+    out.write(smoothstep(0.0, 0.25, coverage / 5.0) * mask.read(gid).r, gid);
 }
 
 // Guided filter with a colour guide, step 1: at the work resolution gather the
@@ -231,7 +280,11 @@ fragment float4 mattePass(VSOut in [[stage_in]],
         // between frames something moved, so the fresh matte wins.
         float dy = abs(lumaTex.sample(s, cuv).r - prevLuma.sample(s, cuv).r);
         float motion = smoothstep(0.015, 0.08, dy);
-        a = mix(a, prev, P.temporal * (1.0 - motion));
+        float weight = P.temporal * (1.0 - motion);
+        // Background removal: smooth where the matte is unsure, which is the
+        // edge band that flickers, and let confident pixels update at once.
+        if (P.personMode > 0.5) weight *= matteUncertainty(a);
+        a = mix(a, prev, weight);
     }
     return float4(a, 0.0, 0.0, 1.0);
 }
@@ -269,10 +322,13 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
                           texture2d<float> fgTex     [[texture(5)]],
                           texture2d<float> bgEstTex  [[texture(6)]],
                           texture2d<float> illumTex  [[texture(7)]],
+                          texture2d<float> softTex   [[texture(8)]],
+                          texture2d<float> albedoTex [[texture(9)]],
                           constant KeyParams &P      [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     constexpr sampler sb(filter::linear, address::clamp_to_edge);
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
 
     float2 cuv = in.uv * P.camScale + P.camOffset;
 
@@ -322,7 +378,6 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
 
     // Colour temperature, camera pixels only: a white-balance gain on red and
     // blue, renormalised so brightness does not change. Layers are untouched.
-    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     if (P.temperature != 0.0 && P.bypass < 0.5) {
         float t = P.temperature * 0.22;
         float3 shifted = rgb * float3(1.0 + t, 1.0, 1.0 - t);
@@ -330,12 +385,42 @@ fragment float4 chromaKey(VSOut in [[stage_in]],
         rgb = saturate(shifted * (before / max(after, 1e-4)));
     }
 
-    // Relight: multiply by the illumination map (see relightMap), which is
-    // low resolution, blurred, and eased frame to frame, so the light is soft
-    // and arrives gradually. rgb is the tint factor, a the light amount.
-    if (P.relight > 0.0 && P.bypass < 0.5) {
+    // Exposure, subject only: a gain in linear light, reduced on pixels that
+    // are already bright and blended back toward the original on highlights,
+    // so a lifted face keeps its skin tones instead of going flat.
+    if (P.exposure != 0.0 && P.bypass < 0.5) {
+        float gain = exp2(P.exposure);
+        float lum = dot(rgb, lumaWeights);
+        float g = mix(gain, min(gain, 1.0), lum * lum);
+        float3 adjusted = linearToSrgb(saturate(srgbToLinear(rgb) * g));
+        rgb = mix(adjusted, rgb, P.exposure > 0.0 ? lum * 0.5 : 0.0);
+    }
+
+    // The soft matte: the matte shrunk and blurred, about a percent of the
+    // frame wide. Effects on the subject are weighted by min(matte, soft)²,
+    // which stops short of the edge and never reaches the background.
+    float soft = P.relight > 0.0 && P.bypass < 0.5 ? softTex.sample(s, in.uv).r : a;
+    float effectWeight = min(a, soft); effectWeight *= effectWeight;
+
+    // Relight from the illumination map (see relightMap), low resolution,
+    // blurred, and eased frame to frame. rgb is the light's tint, a its
+    // amount. The tint keeps the pixel's brightness; Highlights then adds
+    // light as a gain in linear light, more on reflective pixels (albedo:
+    // the pixel's luma against its wide neighbourhood), so skin and light
+    // clothing catch the light and dark hair does not.
+    if (P.relight > 0.0 && P.bypass < 0.5 && effectWeight > 0.0) {
         float4 f = illumTex.sample(s, in.uv);
-        rgb = saturate(rgb * f.rgb * (1.0 + P.highlights * f.a));
+        float3 tinted = rgb * f.rgb;
+        float before = dot(rgb, lumaWeights), after = dot(tinted, lumaWeights);
+        tinted *= before / max(after, 1e-4);
+        rgb = mix(rgb, saturate(tinted), effectWeight);
+        if (P.highlights > 0.0 && f.a > 0.0) {
+            float local = fullRangeLuma(albedoTex.sample(s, cuv).r, P);
+            float albedo = clamp(y / max(local, 0.05), 0.3, 1.8);
+            float3 lin = srgbToLinear(rgb);
+            lin *= 1.0 + 1.2 * P.highlights * f.a * albedo * effectWeight * f.rgb;
+            rgb = linearToSrgb(saturate(lin));
+        }
     }
 
     // A masked foreground is clipped to the subject: blended with the
@@ -454,14 +539,28 @@ fragment float4 relightMap(VSOut in [[stage_in]],
         }
     }
 
+    // Point lights: each sits on a sphere of radius 1.5 around the subject,
+    // placed by its screen position (left and right sweep the front
+    // hemisphere, top and bottom go over and under). The subject is a flat
+    // plane at z = 0 with the normals giving shape, and the light falls off
+    // with distance as 1 / (0.1 + 0.4d + 0.5d²), so a light near the edge of
+    // the frame reaches its side of the subject more than the far side.
+    // Coordinates: x right, y up, z away from the camera.
+    float3 pixel = float3((in.uv.x - 0.5) * P.aspect, -(in.uv.y - 0.5), 0.0);
     for (int i = 0; i < 2; i++) {
         float4 L = i == 0 ? P.light0 : P.light1;
         float3 C = i == 0 ? P.light0Color.rgb : P.light1Color.rgb;
         if (L.z <= 0.0) continue;
-        // From this point toward the light, a little in front so side lights reach the front.
-        float3 dir = normalize(float3((L.x - in.uv.x) * P.aspect, -(L.y - in.uv.y), -0.25));
+        const float dist = 1.5;
+        float theta = clamp(L.y, 0.0, 1.0) * M_PI_F;
+        float phi = (1.0 - clamp(L.x, 0.0, 1.0)) * M_PI_F + M_PI_F * 0.5;
+        float3 lightPos = float3(sin(theta) * sin(phi), cos(theta), sin(theta) * cos(phi)) * dist;
+        float3 toLight = lightPos - pixel;
+        float d = length(toLight);
+        float3 dir = toLight / max(d, 1e-4);
+        float attenuation = 1.0 / (0.1 + 0.4 * d + 0.5 * d * d);
         float lambert = max(dot(n, dir), 0.0);
-        float g = 0.55 * lambert * lambert;
+        float g = 1.1 * lambert * attenuation;
         if (headWeight > 0.0) g += 0.25 * max(dot(P.faceForward.xyz, dir), 0.0) * headWeight;
         g *= L.z;
         lightSum += C * g; kSum += g;
@@ -470,7 +569,9 @@ fragment float4 relightMap(VSOut in [[stage_in]],
     float4 fresh = float4(1.0, 1.0, 1.0, 0.0);
     if (kSum > 1e-4) {
         float3 tint = lightSum / max(max(lightSum.r, max(lightSum.g, lightSum.b)), 1e-4);
-        float k = min(kSum, 1.0) * P.relight;
+        // The slider's bottom end is gentle: a few percent of a saturated
+        // tint already shows on skin, so the strength rises as a power curve.
+        float k = min(kSum, 1.0) * pow(P.relight, 1.7);
         fresh = float4(mix(float3(1.0), tint, k), k);
     }
     if (P.illumReset > 0.5) return fresh;
@@ -514,10 +615,12 @@ kernel void colorStats(texture2d<float> lumaTex   [[texture(0)]],
     atomic_fetch_add_explicit(&sums[0], uint(a * cbcr.x * scale), memory_order_relaxed);
     atomic_fetch_add_explicit(&sums[1], uint(a * cbcr.y * scale), memory_order_relaxed);
     atomic_fetch_add_explicit(&sums[2], uint(a * scale), memory_order_relaxed);
+    atomic_fetch_add_explicit(&sums[6], uint(a * fullRangeLuma(lumaTex.sample(s, cuv).r, P) * scale), memory_order_relaxed);
     if (P.hasBackground > 0.5) {
         float4 bg = bgTex.sample(s, uv * P.bgScale + P.bgOffset);
         float3 c = bg.a > 1e-3 ? bg.rgb / bg.a : float3(0.0);   // premultiplied
         float y = dot(c, float3(0.2126, 0.7152, 0.0722));
+        atomic_fetch_add_explicit(&sums[7], uint(bg.a * y * scale), memory_order_relaxed);
         float cb = (c.b - y) / 1.8556 + 0.5, cr = (c.r - y) / 1.5748 + 0.5;
         atomic_fetch_add_explicit(&sums[3], uint(bg.a * cb * scale), memory_order_relaxed);
         atomic_fetch_add_explicit(&sums[4], uint(bg.a * cr * scale), memory_order_relaxed);

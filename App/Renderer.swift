@@ -57,6 +57,8 @@ struct KeyParams: Codable, Equatable {
     var light1Color = SIMD4<Float>(repeating: 0)
     /// Foreground blend mode: index into ControlsView.blendModes, 0 = normal.
     var fgBlend: Float = 0
+    /// Exposure of the subject in stops, applied in linear light.
+    var exposure: Float = 0
     /// Gaussian sigma in shadow-buffer pixels (not passed to the shader).
     var shadowBlur: Float = 6.0
     /// Gaussian sigma applied to the matte, in output pixels (not passed to the shader).
@@ -93,6 +95,7 @@ struct KeyParams: Codable, Equatable {
         relight = f(.relight, d.relight)
         fgBlend = f(.fgBlend, d.fgBlend)
         highlights = f(.highlights, d.highlights)
+        exposure = f(.exposure, d.exposure)
     }
 }
 
@@ -169,7 +172,25 @@ final class Renderer {
     }
     /// Called on the main thread with the smoothed automatic value when it changes.
     var onAutoTemperature: ((Float) -> Void)?
+    /// Automatic exposure: measure the subject's and the background's mean
+    /// luma and move the subject's exposure toward the background's.
+    var exposureAuto = false {
+        didSet {
+            lock.lock()
+            if exposureAuto { autoExposure = params.exposure } else { params.exposure = autoExposure }
+            lock.unlock()
+        }
+    }
+    var onAutoExposure: ((Float) -> Void)?
+    private var autoExposure: Float = 0
     private var colorStatsPipeline: MTLComputePipelineState!
+    /// Ghost suppression on the coarse person mask, at the mask's size.
+    private var ghostVerticalPipeline: MTLComputePipelineState!
+    private var ghostHorizontalPipeline: MTLComputePipelineState!
+    private var ghostTextures: (counts: MTLTexture, out: MTLTexture)?
+    /// The camera luma shrunk and widely blurred: the albedo reference for Highlights.
+    private var albedoScratch: MTLTexture!, albedoTexture: MTLTexture!
+    private var albedoBlur: MPSImageGaussianBlur!
     /// Relight: the background shrunk and blurred into a light map, the matte
     /// shrunk and blurred into a soft inside map, and the brightest region of
     /// each half of the light map read back as a light.
@@ -272,7 +293,9 @@ final class Renderer {
         downsamplePipeline = try! device.makeRenderPipelineState(descriptor: downDesc)
 
         colorStatsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "colorStats")!)
-        colorStatsBuffer = device.makeBuffer(length: 6 * MemoryLayout<UInt32>.size, options: .storageModeShared)
+        colorStatsBuffer = device.makeBuffer(length: 8 * MemoryLayout<UInt32>.size, options: .storageModeShared)
+        ghostVerticalPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "ghostVertical")!)
+        ghostHorizontalPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "ghostHorizontal")!)
         func small(_ format: MTLPixelFormat, _ size: (w: Int, h: Int), shared: Bool = false) -> MTLTexture {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: size.w, height: size.h, mipmapped: false)
             d.usage = [.shaderRead, .shaderWrite]
@@ -283,6 +306,9 @@ final class Renderer {
         lightTexture = small(.bgra8Unorm, Self.lightSize, shared: true)
         wrapScratch = small(.r8Unorm, Self.wrapSize)
         wrapTexture = small(.r8Unorm, Self.wrapSize)
+        albedoScratch = small(.r8Unorm, Self.wrapSize)
+        albedoTexture = small(.r8Unorm, Self.wrapSize)
+        albedoBlur = MPSImageGaussianBlur(device: device, sigma: 4.0); albedoBlur.edgeMode = .clamp
         shrinkPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "shrinkGrid")!)
         rowExtentsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "rowExtents")!)
         rowExtentsBuffer = device.makeBuffer(length: Self.wrapSize.h * MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
@@ -398,6 +424,46 @@ final class Renderer {
         wide.encode(commandBuffer: cmd, sourceTexture: t.prep[3], destinationTexture: t.wide[2])
         wide.encode(commandBuffer: cmd, sourceTexture: t.bgPrep, destinationTexture: t.wide[3])
         return (t.meansAB, t.bgMeans, t.wide)
+    }
+
+    /// Two passes over the coarse mask that drop isolated specks. Returns the
+    /// cleaned mask at the same size.
+    private func encodeGhostSuppression(_ cmd: MTLCommandBuffer, mask: MTLTexture) -> MTLTexture {
+        if ghostTextures == nil || ghostTextures!.out.width != mask.width || ghostTextures!.out.height != mask.height {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: mask.width, height: mask.height, mipmapped: false)
+            d.storageMode = .private
+            d.usage = [.shaderRead, .shaderWrite]
+            ghostTextures = (device.makeTexture(descriptor: d)!, device.makeTexture(descriptor: d)!)
+        }
+        guard let t = ghostTextures, let enc = cmd.makeComputeCommandEncoder() else { return mask }
+        let grid = MTLSize(width: mask.width, height: mask.height, depth: 1)
+        let group = MTLSize(width: 16, height: 16, depth: 1)
+        enc.setComputePipelineState(ghostVerticalPipeline)
+        enc.setTexture(mask, index: 0); enc.setTexture(t.counts, index: 1)
+        enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+        enc.setComputePipelineState(ghostHorizontalPipeline)
+        enc.setTexture(t.counts, index: 0); enc.setTexture(mask, index: 1); enc.setTexture(t.out, index: 2)
+        enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+        enc.endEncoding()
+        return t.out
+    }
+
+    /// Read the luma sums back and ease the automatic exposure toward the
+    /// stops that bring the subject's mean brightness to the background's,
+    /// at a little over half strength so a bright scene lifts a dim subject
+    /// without flattening them.
+    private func updateAutoExposure() {
+        let sums = colorStatsBuffer.contents().bindMemory(to: UInt32.self, capacity: 8)
+        var target: Float = 0
+        if sums[2] > 1024 * 50, sums[5] > 1024 * 50 {
+            let subject = max(Float(sums[6]) / Float(sums[2]), 0.02)
+            let background = max(Float(sums[7]) / Float(sums[5]), 0.02)
+            target = min(max(0.6 * log2(background / subject), -1.5), 1.5)
+        }
+        let next = autoExposure + (target - autoExposure) * 0.15
+        guard abs(next - autoExposure) > 0.002 || (target == 0 && autoExposure != 0) else { return }
+        autoExposure = next
+        if let onAutoExposure { let value = next; DispatchQueue.main.async { onAutoExposure(value) } }
     }
 
     private func ensureProcessTextures() {
@@ -534,9 +600,14 @@ final class Renderer {
         var maskTexture: MTLTexture = dummyBackground
         var maskKeepAlive: Any? = nil
         var small: CVPixelBuffer? = nil
-        lock.lock(); let usePerson = matte == .person; let auto = temperatureAuto && p.colorEnabled > 0.5; lock.unlock()
+        lock.lock()
+        let usePerson = matte == .person
+        let auto = temperatureAuto && p.colorEnabled > 0.5
+        let autoExp = exposureAuto && p.colorEnabled > 0.5 && bg != nil
+        lock.unlock()
         if auto { p.temperature = autoTemperature }
-        if p.colorEnabled < 0.5 { p.temperature = 0 }
+        if autoExp { p.exposure = autoExposure }
+        if p.colorEnabled < 0.5 { p.temperature = 0; p.exposure = 0 }
         if usePerson, p.bypass < 0.5, let pre = commandQueue.makeCommandBuffer(),
            let frame = encodeTrackingFrame(pre, luma: luma.texture, chroma: chroma.texture, params: &p) {
             pre.commit()
@@ -561,7 +632,8 @@ final class Renderer {
         var backgroundEstimate: MTLTexture = dummyBackground
         var wideTextures: [MTLTexture] = Array(repeating: dummyBackground, count: 4)
         if p.personMode > 0.5 {
-            (guideTexture, backgroundEstimate, wideTextures) = encodeGuidedUpsample(cmd, luma: luma.texture, chroma: chroma.texture, mask: maskTexture, params: p, camW: camW, camH: camH)
+            let cleaned = encodeGhostSuppression(cmd, mask: maskTexture)
+            (guideTexture, backgroundEstimate, wideTextures) = encodeGuidedUpsample(cmd, luma: luma.texture, chroma: chroma.texture, mask: cleaned, params: p, camW: camW, camH: camH)
         }
 
         // Previous frame's luma for motion detection in the temporal blend.
@@ -632,19 +704,25 @@ final class Renderer {
             }
         }
 
-        // Relight maps: the background to 64×36 and blurred, the matte to 96×54
-        // and blurred. A grid-sampling kernel does the big downscale cheaply.
+        // The soft matte: the matte to 96×54 and blurred, the weight of every
+        // effect on the subject. Relight maps: the
+        // background to 64×36 and blurred for the lights, the camera luma to
+        // 96×54 and widely blurred as the albedo reference. A grid-sampling
+        // kernel does the big downscales cheaply.
         let relighting = p.relight > 0 && p.bypass < 0.5 && bg != nil
         if relighting, let bg, let enc = cmd.makeComputeCommandEncoder() {
             enc.setComputePipelineState(shrinkPipeline)
-            for (src, dst) in [(bg, lightScratch!), (matteSource, wrapScratch!)] {
+            for (src, dst) in [(matteSource, wrapScratch!), (bg, lightScratch!), (luma.texture, albedoScratch!)] {
                 enc.setTexture(src, index: 0); enc.setTexture(dst, index: 1)
                 enc.dispatchThreads(MTLSize(width: dst.width, height: dst.height, depth: 1),
                                     threadsPerThreadgroup: MTLSize(width: 16, height: 6, depth: 1))
             }
             enc.endEncoding()
-            lightBlur.encode(commandBuffer: cmd, sourceTexture: lightScratch, destinationTexture: lightTexture)
             wrapBlur.encode(commandBuffer: cmd, sourceTexture: wrapScratch, destinationTexture: wrapTexture)
+        }
+        if relighting {
+            lightBlur.encode(commandBuffer: cmd, sourceTexture: lightScratch, destinationTexture: lightTexture)
+            albedoBlur.encode(commandBuffer: cmd, sourceTexture: albedoScratch, destinationTexture: albedoTexture)
             if let rows = cmd.makeComputeCommandEncoder() {
                 rows.setComputePipelineState(rowExtentsPipeline)
                 rows.setTexture(wrapTexture, index: 0)
@@ -678,7 +756,7 @@ final class Renderer {
         let measureLights = relighting && frameIndex % Self.colorStatsEvery == 3
 
         // Colour statistics for the automatic temperature, every few frames.
-        let measureColor = auto && frameIndex % Self.colorStatsEvery == 0
+        let measureColor = (auto || autoExp) && frameIndex % Self.colorStatsEvery == 0
         if measureColor, let blit = cmd.makeBlitCommandEncoder() {
             blit.fill(buffer: colorStatsBuffer, range: 0..<colorStatsBuffer.length, value: 0)
             blit.endEncoding()
@@ -710,6 +788,8 @@ final class Renderer {
         enc.setFragmentTexture(fg ?? dummyBackground, index: 5)
         enc.setFragmentTexture(backgroundEstimate, index: 6)
         enc.setFragmentTexture(illumBlurred, index: 7)
+        enc.setFragmentTexture(relighting ? wrapTexture : dummyBackground, index: 8)
+        enc.setFragmentTexture(relighting ? albedoTexture : dummyBackground, index: 9)
         p.shadowPad = shadowPad
         enc.setFragmentBytes(&p, length: MemoryLayout<KeyParams>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -742,7 +822,10 @@ final class Renderer {
             guard let self else { return }
             onOutput?(outBuffer)
             if let trackingBuffer { onTrackingFrame?(trackingBuffer) }
-            if measureColor { updateAutoTemperature() }
+            if measureColor {
+                if auto { updateAutoTemperature() }
+                if autoExp { updateAutoExposure() }
+            }
             if measureLights { updateLights(bgScale: p.bgScale, bgOffset: p.bgOffset) }
             recordStats(buffer)
         }

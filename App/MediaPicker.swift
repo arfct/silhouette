@@ -40,7 +40,7 @@ enum PickerAddKind {
     }
     var tooltip: String {
         switch self {
-        case .file: "Add an image or movie file"
+        case .file: "Add an image or movie file, or a folder of backgrounds"
         case .video: "Add a movie file as the source"
         case .web: "Add a web page by its address"
         case .color: "Add a colour, typed as hex or picked"
@@ -52,6 +52,8 @@ struct PickerSection {
     var title: String
     var items: [PickerItem]
     var add: PickerAddKind? = nil
+    /// A folder the section lists; its header gets a button to forget it.
+    var forget: String? = nil
 }
 
 // MARK: - Labels
@@ -255,6 +257,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
     var onRemove: ((String) -> Void)?
     /// For entry kinds, the typed text; nil for panel kinds.
     var onAdd: ((PickerAddKind, String?) -> Void)?
+    var onForget: ((String) -> Void)?
 
     private let popover = NSPopover()
     private var controller: PickerViewController?
@@ -265,6 +268,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
         let vc = PickerViewController(title: title, sections: sections, selected: selected)
         vc.onSelect = { [weak self] value in self?.close(); self?.onSelect?(value) }
         vc.onRemove = { [weak self] value in self?.onRemove?(value) }
+        vc.onForget = { [weak self] path in self?.onForget?(path) }
         vc.onAdd = { [weak self] kind, text in
             self?.close()
             self?.onAdd?(kind, text)
@@ -298,6 +302,7 @@ final class PickerPopover: NSObject, NSPopoverDelegate {
 private final class PickerViewController: NSViewController, NSTextFieldDelegate {
     var onSelect: ((String) -> Void)?
     var onRemove: ((String) -> Void)?
+    var onForget: ((String) -> Void)?
     var onAdd: ((PickerAddKind, String?) -> Void)?
     var onEntryOpened: ((Bool) -> Void)?
 
@@ -375,11 +380,28 @@ private final class PickerViewController: NSViewController, NSTextFieldDelegate 
                 let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: add.tooltip)!, target: self, action: #selector(addTapped(_:)))
                 plus.bezelStyle = .accessoryBarAction
                 plus.isBordered = false
-                plus.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
-                plus.contentTintColor = .controlAccentColor
+                plus.symbolConfiguration = .init(pointSize: 17, weight: .bold)
+                plus.contentTintColor = .white   // the window is always dark
                 plus.toolTip = add.tooltip
                 plus.tag = index
+                plus.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([   // a target worth hitting, not just the glyph
+                    plus.widthAnchor.constraint(equalToConstant: 30),
+                    plus.heightAnchor.constraint(equalToConstant: 30),
+                ])
                 headerViews.append(plus)
+            }
+            if section.forget != nil {
+                let forget = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Forget this folder")!, target: self, action: #selector(forgetTapped(_:)))
+                forget.bezelStyle = .accessoryBarAction
+                forget.isBordered = false
+                forget.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
+                forget.contentTintColor = .secondaryLabelColor
+                forget.toolTip = "Forget this folder. Its files stay where they are."
+                forget.tag = index
+                forget.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([forget.widthAnchor.constraint(equalToConstant: 30), forget.heightAnchor.constraint(equalToConstant: 30)])
+                headerViews.append(forget)
             }
             let headerRow = NSStackView(views: headerViews)
             headerRow.distribution = .fill
@@ -457,6 +479,11 @@ private final class PickerViewController: NSViewController, NSTextFieldDelegate 
         stack.layoutSubtreeIfNeeded()
         preferredContentSize.height = min(stack.fittingSize.height, 520)
         row.scrollToVisible(row.bounds.insetBy(dx: 0, dy: -40))   // the Colors field can sit below the fold
+    }
+
+    @objc private func forgetTapped(_ sender: NSButton) {
+        guard sections.indices.contains(sender.tag), let path = sections[sender.tag].forget else { return }
+        onForget?(path)
     }
 
     @objc private func addTapped(_ sender: NSButton) {

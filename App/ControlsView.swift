@@ -230,6 +230,7 @@ final class ControlsView: NSView {
     /// Apple Chromakey was chosen: explain the Video Effects setup.
     var onAppleChromakey: (() -> Void)?
     var onTemperatureAuto: ((Bool) -> Void)?
+    var onExposureAuto: ((Bool) -> Void)?
     /// True freezes the current frame for tuning; false goes back to live video.
     var onFreeze: ((Bool) -> Void)?
     var onFaceHighRate: ((Bool) -> Void)?
@@ -280,10 +281,15 @@ final class ControlsView: NSView {
     var layerSnapshot: ((LayerSlot) -> NSImage?)?
     /// Forget a layer recent (URL, path, or colour), or a recent movie source by path.
     var onRemoveRecent: ((String) -> Void)?
+    var onForgetFolder: ((String) -> Void)?
+    /// Folders of backgrounds, each listed as its own picker section.
+    private var sceneFolders: [(path: String, name: String, files: [String])] = []
     var onRemoveVideo: ((String) -> Void)?
     private let trackSwitch = NSSwitch()
     private let overlaySwitch = NSSwitch()
     private let temperatureAutoSwitch = NSButton()
+    private let exposureAutoSwitch = NSButton()
+    private var exposureCell: NSView!
     private let colorSwitch = NSSwitch()
     /// Foreground blend modes, in the shader's order; Normal is 0.
     static let blendModes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Add", "Lighten", "Darken", "Difference", "Exclusion"]
@@ -392,6 +398,7 @@ final class ControlsView: NSView {
         layerStrip.translatesAutoresizingMaskIntoConstraints = false
         picker.onSelect = { [weak self] value in self?.pickerChose(value) }
         picker.onRemove = { [weak self] value in self?.pickerRemoved(value) }
+        picker.onForget = { [weak self] path in self?.onForgetFolder?(path) }
         picker.onAdd = { [weak self] kind, text in self?.pickerAdded(kind, text) }
         showLayer(.background, Self.noneTitle)
         showLayer(.foreground, Self.noneTitle)
@@ -501,13 +508,27 @@ final class ControlsView: NSView {
         let temperatureRow = NSStackView(views: [temperatureCell, temperatureAutoSwitch])
         temperatureRow.spacing = 8
         temperatureRow.alignment = .bottom   // the button sits level with the slider, not the title
+        exposureAutoSwitch.setButtonType(.pushOnPushOff)
+        exposureAutoSwitch.bezelStyle = .rounded
+        exposureAutoSwitch.controlSize = .small
+        exposureAutoSwitch.title = "Auto"
+        exposureAutoSwitch.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        exposureAutoSwitch.target = self; exposureAutoSwitch.action = #selector(exposureAutoChanged)
+        exposureAutoSwitch.toolTip = "Match the background's brightness: measure your average brightness and the background's, and lift or lower yours toward it. Off, set it yourself. Needs a background layer."
+        exposureAutoSwitch.setContentHuggingPriority(.required, for: .horizontal)
+        let exposureCell = sliderCell("Exposure", \.exposure, -2...2, scale: 1, decimals: 1,
+                                      tip: "Brightness of your image only, in stops. Bright areas are lifted less than shadows, so skin keeps its shape. Layers are not affected.")
+        self.exposureCell = exposureCell
+        let exposureRow = NSStackView(views: [exposureCell, exposureAutoSwitch])
+        exposureRow.spacing = 8
+        exposureRow.alignment = .bottom
         let relightRow = columns([
             sliderCell("Relight", \.relight, 0...1, scale: 100, decimals: 0,
-                       tip: "Lets the background light you: its colour wraps around your edges, and its brightest areas light your head from their direction, following where you face when face tracking is on. Needs a background layer."),
+                       tip: "Lets the background light you: its brightest area on each side becomes a light that falls off with distance, lighting your body as a cylinder and your head as a sphere, following where you face when face tracking is on. Needs a background layer."),
             sliderCell("Highlights", \.highlights, 0...1, scale: 100, decimals: 0,
-                       tip: "How much the relight brightens the lit areas as well as tinting them. 0 keeps your brightness; 100 adds strong highlights."),
+                       tip: "How much the relight adds light as well as tint. 0 keeps your brightness; 100 adds strong highlights, more on skin and light clothing than on dark hair."),
         ])
-        let colorStack = NSStackView(views: [temperatureRow, relightRow])
+        let colorStack = NSStackView(views: [temperatureRow, exposureRow, relightRow])
         colorStack.orientation = .vertical
         colorStack.alignment = .leading
         colorStack.spacing = 8
@@ -870,6 +891,11 @@ final class ControlsView: NSView {
         if case .layer(let slot)? = pickerTarget { picker.update(sections: layerSections(slot), selected: layerValues[slot]) }
     }
 
+    func setSceneFolders(_ folders: [(path: String, name: String, files: [String])]) {
+        sceneFolders = folders
+        if case .layer(let slot)? = pickerTarget { picker.update(sections: layerSections(slot), selected: layerValues[slot]) }
+    }
+
     private enum LayerKind { case none, testPage, file, web, color }
     private static func layerKind(_ value: String) -> LayerKind {
         if value == noneTitle || value.isEmpty { return .none }
@@ -880,7 +906,7 @@ final class ControlsView: NSView {
     }
 
     /// The tile for a layer value. The current web page of `slot` shows its snapshot.
-    private func layerItem(_ value: String, slot: LayerSlot?) -> PickerItem {
+    private func layerItem(_ value: String, slot: LayerSlot?, removable: Bool = true) -> PickerItem {
         let current = slot.map { layerValues[$0] == value } ?? false
         let snapshot = current ? slot.flatMap { layerSnapshot?($0) } : nil
         switch Self.layerKind(value) {
@@ -894,7 +920,7 @@ final class ControlsView: NSView {
             return PickerItem(value: value, title: hex, thumbnail: .color(Self.nsColor(hex: hex) ?? .clear), removable: true)
         case .file:
             let path = value.hasPrefix("file://") ? (URL(string: value)?.path ?? value) : (value as NSString).expandingTildeInPath
-            return PickerItem(value: value, title: PickerLabel.file(path), thumbnail: .file(URL(fileURLWithPath: path)), tooltip: path, removable: true)
+            return PickerItem(value: value, title: PickerLabel.file(path), thumbnail: .file(URL(fileURLWithPath: path)), tooltip: path, removable: removable)
         case .web:
             let url = URL(string: value.contains("://") ? value : "https://" + value) ?? URL(string: "https://example.com")!
             return PickerItem(value: value, title: PickerLabel.web(value), thumbnail: snapshot.map { .image($0) } ?? .web(url), tooltip: value, removable: true)
@@ -904,6 +930,9 @@ final class ControlsView: NSView {
     private func layerSections(_ slot: LayerSlot) -> [PickerSection] {
         var files: [PickerItem] = [], webs: [PickerItem] = [], colors: [PickerItem] = []
         for value in recentURLs {
+            // A scene's tint map belongs to its background; the Background picker does not list it.
+            if slot == .background, Self.layerKind(value) == .file,
+               URL(fileURLWithPath: value).deletingPathExtension().lastPathComponent.hasSuffix("-foreground") { continue }
             let item = layerItem(value, slot: slot)
             switch Self.layerKind(value) {
             case .file: files.append(item)
@@ -912,12 +941,20 @@ final class ControlsView: NSView {
             default: break
             }
         }
-        return [
+        var sections = [
             PickerSection(title: "Built in", items: [layerItem(Self.noneTitle, slot: slot), layerItem(Self.testPageTitle, slot: slot)]),
             PickerSection(title: "Images and movies", items: files, add: .file),
+        ]
+        if slot == .background {
+            for folder in sceneFolders {
+                sections.append(PickerSection(title: folder.name, items: folder.files.map { layerItem($0, slot: slot, removable: false) }, forget: folder.path))
+            }
+        }
+        sections += [
             PickerSection(title: "Web pages", items: webs, add: .web),
             PickerSection(title: "Colors", items: colors, add: .color),
         ]
+        return sections
     }
 
     static func nsColor(hex: String) -> NSColor? {
@@ -1130,10 +1167,25 @@ final class ControlsView: NSView {
         colorBody.isHidden = !colorOn
         for toggle in [keySwitch, shadowSwitch, colorSwitch, trackSwitch] { toggle.isEnabled = true }
         // Within Color, Auto drives the temperature, so the slider dims while it is on.
-        let manual = temperatureAutoSwitch.state == .off
-        temperatureCell.alphaValue = manual ? 1 : 0.45
-        func enable(_ v: NSView) { (v as? NSControl)?.isEnabled = manual; v.subviews.forEach(enable) }
-        enable(temperatureCell)
+        for (cell, auto) in [(temperatureCell!, temperatureAutoSwitch), (exposureCell!, exposureAutoSwitch)] {
+            let manual = auto.state == .off
+            cell.alphaValue = manual ? 1 : 0.45
+            func enable(_ v: NSView) { (v as? NSControl)?.isEnabled = manual; v.subviews.forEach(enable) }
+            enable(cell)
+        }
+    }
+
+    var exposureAuto: Bool {
+        get { exposureAutoSwitch.state == .on }
+        set { exposureAutoSwitch.state = newValue ? .on : .off; refreshEnabledStates() }
+    }
+    @objc private func exposureAutoChanged() { refreshEnabledStates(); onExposureAuto?(exposureAutoSwitch.state == .on) }
+
+    /// Show the automatic exposure in the slider without treating it as a user change.
+    func showExposure(_ value: Float) {
+        guard let (slider, cell, _, scale, decimals) = cells[\.exposure] else { return }
+        slider.floatValue = value
+        cell.value.stringValue = Self.format(value, scale: scale, decimals: decimals)
     }
 
     var temperatureAuto: Bool {
@@ -1243,15 +1295,27 @@ final class ControlsView: NSView {
 
     @objc private func mirrorChanged() { mirrorButton.isOn.toggle(); onMirrorPreview?(mirrorButton.isOn) }
 
-    /// The current camera's tile shows a still from it, taken once frames are flowing.
+    /// The Source tile shows a still from the live source: one soon after a
+    /// switch, once frames are flowing, then a fresh one every minute
+    /// while the window is visible. A small picture, so the cost is nothing.
+    private var sourceThumbnailTimer: Timer?
     private func scheduleSourceThumbnail() {
-        guard let selection = sourceSelection, selection.hasPrefix("camera:") else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, sourceSelection == selection, let image = currentFrameImage?(),
-                  var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
-            item.thumbnail = .image(image)
-            sourceTile.show(item)
+        sourceThumbnailTimer?.invalidate()
+        sourceThumbnailTimer = nil
+        guard sourceSelection != nil else { return }
+        // Twice early: a camera can take a couple of seconds to deliver after a switch.
+        for delay in [1.5, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refreshSourceThumbnail() }
         }
+        sourceThumbnailTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refreshSourceThumbnail() }
+    }
+
+    private func refreshSourceThumbnail() {
+        guard let selection = sourceSelection, window?.occlusionState.contains(.visible) == true,
+              let image = currentFrameImage?(),
+              var item = sourceSections().flatMap(\.items).first(where: { $0.value == selection }) else { return }
+        item.thumbnail = .image(image)
+        sourceTile.show(item)
     }
 
 
