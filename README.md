@@ -11,6 +11,10 @@ Hang a green or blue backdrop, point your camera at it, and Silhouette removes i
 
 Requires macOS 26 or later. A physical green or blue backdrop gives the best results; Background Removal works without one.
 
+## Try it
+
+Silhouette is in beta on TestFlight: [join the beta](https://testflight.apple.com/join/EmuWevCK). Install the TestFlight app from the Mac App Store first.
+
 ## Links
 
 - [Support](https://arfct.github.io/silhouette/support/)
