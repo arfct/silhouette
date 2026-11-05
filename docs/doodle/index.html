@@ -25,7 +25,11 @@
 const GREY = "#dcdcdc", INK = "#000", MOUTH_FILL = "rgb(113,18,52)";
 // Thresholds on height / width ratios (the same definition Silhouette's API uses).
 const EYE_CLOSED = 0.16, EYE_HALF = 0.22;
-const MOUTH_BINS = [0.06, 0.18, 0.35, 0.6]; // below each: frame 1..4, above the last: frame 5
+// Mouth frames come from openness normalised to the range seen so far: 0 at rest, 1 at the widest.
+const MOUTH_BINS = [0.15, 0.4, 0.62, 0.85]; // below each: frame 1..4, above the last: frame 5
+const MOUTH_HYST = 0.05;   // a frame changes only once the value is this far past a bin edge
+const MOUTH_MIN_SPAN = 0.3; // in raw ratio units, so a small first range doesn't amplify noise
+const ADAPT = 0.0005;       // per frame: how fast rest creeps up and the peak decays
 const NOSE_FLIP = 0.06; // yaw ratio hysteresis
 
 const cv = document.getElementById("c"), ctx = cv.getContext("2d");
@@ -33,6 +37,19 @@ const hud = document.getElementById("hud"), msg = document.getElementById("msg")
 const params = new URLSearchParams(location.search);
 let mirror = params.get("mirror") !== "0";
 if (params.get("hud") === "0") document.body.classList.add("nohud");
+let mRaw = null, mRest = null, mPeak = null, mFrame = 1, mNorm = 0;
+// Track the resting value (follows down fast, up slowly) and the peak (follows up fast, decays slowly).
+function normMouth(v) {
+  mRaw = mRaw == null ? v : mRaw + (v - mRaw) * 0.5;
+  if (mRest == null) { mRest = mRaw; mPeak = mRaw + MOUTH_MIN_SPAN; }
+  mRest += (mRaw - mRest) * (mRaw < mRest ? 0.3 : ADAPT);
+  mPeak += (mRaw - mPeak) * (mRaw > mPeak ? 0.5 : ADAPT);
+  mNorm = Math.min(1, Math.max(0, (mRaw - mRest) / Math.max(MOUTH_MIN_SPAN, mPeak - mRest)));
+  // Frame with hysteresis.
+  while (mFrame <= MOUTH_BINS.length && mNorm >= MOUTH_BINS[mFrame - 1] + MOUTH_HYST) mFrame++;
+  while (mFrame > 1 && mNorm < MOUTH_BINS[mFrame - 2] - MOUTH_HYST) mFrame--;
+  return mFrame;
+}
 let face = null, noseDir = 1, srcW = 16, srcH = 9, fps = 0, lastT = 0;
 
 function resize() { const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d; }
@@ -63,16 +80,15 @@ function eye(p, u, open, roll, sx) {
   ctx.fill(); ctx.restore();
 }
 function nose(p, u, roll, sx, dir) {
-  // A "7": top bar, then a diagonal down and back. dir flips it with the head's turn.
+  // The lens's "7" upside down: a diagonal from the bridge down to a foot. dir flips it with the head's turn.
   ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx * dir, 1);
   ctx.strokeStyle = INK; ctx.lineWidth = 0.045 * u; ctx.lineCap = "round"; ctx.lineJoin = "round";
   const w = 0.42 * u, h = 0.6 * u;
-  ctx.beginPath(); ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0); ctx.lineTo(-w * 0.12, h); ctx.stroke(); ctx.restore();
+  ctx.beginPath(); ctx.moveTo(-w * 0.12, 0); ctx.lineTo(w / 2, h); ctx.lineTo(-w / 2, h); ctx.stroke(); ctx.restore();
 }
-function mouth(p, u, open, roll, sx) {
+function mouth(p, u, f, roll, sx) {
   ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx, 1);
   ctx.strokeStyle = INK; ctx.lineCap = "round"; ctx.lineJoin = "round";
-  let f = 1; while (f <= MOUTH_BINS.length && open >= MOUTH_BINS[f - 1]) f++;
   const k = 1.4 / 346 * u; // texture pixels to canvas, from the closed frame's 346 px = 1.4 IOD
   if (f === 1) {
     const w = 346 * k, lw = 0.035 * u;
@@ -105,8 +121,8 @@ function draw() {
   // Nose: top on the eye line, nudged toward the real nose for the turn.
   const n = face.nose ? m(face.nose) : mid;
   nose({ x: mid.x + (n.x - mid.x) * 0.6, y: mid.y + 0.05 * u }, u, roll, sx, noseDir);
-  const f = mouth(m(face.mouth), u, face.mouth.open, roll, sx);
-  hud.textContent = `eyes ${leOpen.toFixed(2)} ${reOpen.toFixed(2)}  mouth ${face.mouth.open.toFixed(2)} (frame ${f})  yaw ${(face.yaw * 57.3).toFixed(0)}°  ${fps.toFixed(0)} fps\nm mirror  h hide`;
+  const f = mouth(m(face.mouth), u, normMouth(face.mouth.open), roll, sx);
+  hud.textContent = `eyes ${leOpen.toFixed(2)} ${reOpen.toFixed(2)}  mouth ${face.mouth.open.toFixed(2)} → ${mNorm.toFixed(2)} (rest ${mRest.toFixed(2)}, peak ${mPeak.toFixed(2)}, frame ${f})  yaw ${(face.yaw * 57.3).toFixed(0)}°  ${fps.toFixed(0)} fps\nm mirror  h hide`;
 }
 function tick(t) { if (lastT) fps = fps * 0.9 + 100 / Math.max(1, t - lastT); lastT = t; }
 
