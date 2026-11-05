@@ -36,7 +36,8 @@ const cv = document.getElementById("c"), ctx = cv.getContext("2d");
 const hud = document.getElementById("hud"), msg = document.getElementById("msg");
 const params = new URLSearchParams(location.search);
 let mirror = params.get("mirror") !== "0";
-if (params.get("hud") === "0") document.body.classList.add("nohud");
+// The readout is hidden unless ?hud=1; h toggles it.
+if (params.get("hud") !== "1") document.body.classList.add("nohud");
 let mRaw = null, mRest = null, mPeak = null, mFrame = 1, mNorm = 0;
 // Track the resting value (follows down fast, up slowly) and the peak (follows up fast, decays slowly).
 function normMouth(v) {
@@ -79,11 +80,11 @@ function eye(p, u, open, roll, sx) {
   else { ctx.beginPath(); ctx.arc(0, 0, d / 2, 0, Math.PI * 2); }                      // dot
   ctx.fill(); ctx.restore();
 }
-function nose(p, u, roll, sx, dir) {
+function nose(p, u, h, roll, sx, dir) {
   // The lens's "7" upside down: a diagonal from the bridge down to a foot. dir flips it with the head's turn.
   ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx * dir, 1);
   ctx.strokeStyle = INK; ctx.lineWidth = 0.045 * u; ctx.lineCap = "round"; ctx.lineJoin = "round";
-  const w = 0.42 * u, h = 0.6 * u;
+  const w = 0.72 * h; // the lens art's width to height
   ctx.beginPath(); ctx.moveTo(-w * 0.12, 0); ctx.lineTo(w / 2, h); ctx.lineTo(-w / 2, h); ctx.stroke(); ctx.restore();
 }
 function mouth(p, u, f, roll, sx) {
@@ -120,8 +121,13 @@ function draw() {
   eye(R, u, reOpen, roll, sx);
   // Nose: top on the eye line, nudged toward the real nose for the turn.
   const n = face.nose ? m(face.nose) : mid;
-  nose({ x: mid.x + (n.x - mid.x) * 0.6, y: mid.y + 0.05 * u }, u, roll, sx, noseDir);
-  const f = mouth(m(face.mouth), u, normMouth(face.mouth.open), roll, sx);
+  // Nose length spans the eye line to just above the mouth, measured along the face's down axis.
+  const mp = m(face.mouth);
+  const down = (mp.x - mid.x) * -Math.sin(roll) + (mp.y - mid.y) * Math.cos(roll);
+  const noseH = Math.max(0.6 * u, down - 0.2 * u);
+  const top = { x: mid.x + (n.x - mid.x) * 0.6, y: mid.y };
+  nose({ x: top.x - Math.sin(roll) * 0.08 * u, y: top.y + Math.cos(roll) * 0.08 * u }, u, noseH, roll, sx, noseDir);
+  const f = mouth(mp, u, normMouth(face.mouth.open), roll, sx);
   hud.textContent = `eyes ${leOpen.toFixed(2)} ${reOpen.toFixed(2)}  mouth ${face.mouth.open.toFixed(2)} → ${mNorm.toFixed(2)} (rest ${mRest.toFixed(2)}, peak ${mPeak.toFixed(2)}, frame ${f})  yaw ${(face.yaw * 57.3).toFixed(0)}°  ${fps.toFixed(0)} fps\nm mirror  h hide`;
 }
 function tick(t) { if (lastT) fps = fps * 0.9 + 100 / Math.max(1, t - lastT); lastT = t; }
