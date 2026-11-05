@@ -121,12 +121,13 @@ function draw() {
   eye(R, u, reOpen, roll, sx);
   // Nose: top on the eye line, nudged toward the real nose for the turn.
   const n = face.nose ? m(face.nose) : mid;
-  // Nose length spans the eye line to just above the mouth, measured along the face's down axis.
+  // Nose length: the original 0.6 eye-distances, plus a third of any extra room above the mouth
+  // (eye line to mouth, along the face's down axis), so a long face gets a slightly longer nose.
   const mp = m(face.mouth);
   const down = (mp.x - mid.x) * -Math.sin(roll) + (mp.y - mid.y) * Math.cos(roll);
-  const noseH = Math.max(0.6 * u, down - 0.2 * u);
+  const noseH = 0.6 * u + Math.max(0, down - 0.8 * u) / 3;
   const top = { x: mid.x + (n.x - mid.x) * 0.6, y: mid.y };
-  nose({ x: top.x - Math.sin(roll) * 0.08 * u, y: top.y + Math.cos(roll) * 0.08 * u }, u, noseH, roll, sx, noseDir);
+  nose({ x: top.x - Math.sin(roll) * 0.05 * u, y: top.y + Math.cos(roll) * 0.05 * u }, u, noseH, roll, sx, noseDir);
   const f = mouth(mp, u, normMouth(face.mouth.open), roll, sx);
   hud.textContent = `eyes ${leOpen.toFixed(2)} ${reOpen.toFixed(2)}  mouth ${face.mouth.open.toFixed(2)} → ${mNorm.toFixed(2)} (rest ${mRest.toFixed(2)}, peak ${mPeak.toFixed(2)}, frame ${f})  yaw ${(face.yaw * 57.3).toFixed(0)}°  ${fps.toFixed(0)} fps\nm mirror  h hide`;
 }
