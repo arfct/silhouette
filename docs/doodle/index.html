@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Doodle face</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #dcdcdc; font: 15px/1.4 -apple-system, system-ui, sans-serif; color: #333; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  video { display: none; }
+  #msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; max-width: 80vw; }
+  #msg button { font: inherit; padding: 10px 18px; border-radius: 10px; border: 0; background: #222; color: #fff; cursor: pointer; }
+  #hud { position: fixed; left: 12px; bottom: 10px; font: 12px ui-monospace, Menlo, monospace; color: #777; white-space: pre; }
+  body.nohud #hud { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted></video>
+<div id="msg"><button id="go">Start camera</button><p>The camera stays on this device. Face tracking runs in the browser.</p></div>
+<div id="hud"></div>
+<script type="module">
+// A doodle face on a grey card that follows the tracked face.
+// Sources: MediaPipe Face Landmarker on the webcam, or Silhouette's window.silhouette face events.
+const GREY = "#dcdcdc", INK = "#000", MOUTH_FILL = "rgb(113,18,52)";
+// Thresholds on height / width ratios (the same definition Silhouette's API uses).
+const EYE_CLOSED = 0.16, EYE_HALF = 0.22;
+const MOUTH_BINS = [0.06, 0.18, 0.35, 0.6]; // below each: frame 1..4, above the last: frame 5
+const NOSE_FLIP = 0.06; // yaw ratio hysteresis
+
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const hud = document.getElementById("hud"), msg = document.getElementById("msg");
+const params = new URLSearchParams(location.search);
+let mirror = params.get("mirror") !== "0";
+if (params.get("hud") === "0") document.body.classList.add("nohud");
+let face = null, noseDir = 1, srcW = 16, srcH = 9, fps = 0, lastT = 0;
+
+function resize() { const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d; }
+addEventListener("resize", resize); resize();
+addEventListener("keydown", (e) => {
+  if (e.key === "m") mirror = !mirror;
+  if (e.key === "h") document.body.classList.toggle("nohud");
+});
+
+// Map normalised source coordinates to canvas pixels with "cover" fit.
+function mapper() {
+  const s = Math.max(cv.width / srcW, cv.height / srcH);
+  const ox = (cv.width - srcW * s) / 2, oy = (cv.height - srcH * s) / 2;
+  return (p) => ({ x: ox + (mirror ? 1 - p.x : p.x) * srcW * s, y: oy + p.y * srcH * s });
+}
+
+// ---- drawing (vector redraws of the lens's sprites) ----
+function rrect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function eye(p, u, open, roll, sx) {
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx, 1); ctx.fillStyle = INK;
+  const d = 0.44 * u;
+  if (open < EYE_CLOSED) rrect(-d / 2, -0.026 * u, d, 0.052 * u, 0.026 * u);          // dash
+  else if (open < EYE_HALF) rrect(-d / 2, -0.108 * u, d, 0.216 * u, 0.06 * u);         // half pill
+  else { ctx.beginPath(); ctx.arc(0, 0, d / 2, 0, Math.PI * 2); }                      // dot
+  ctx.fill(); ctx.restore();
+}
+function nose(p, u, roll, sx, dir) {
+  // A "7": top bar, then a diagonal down and back. dir flips it with the head's turn.
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx * dir, 1);
+  ctx.strokeStyle = INK; ctx.lineWidth = 0.045 * u; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  const w = 0.42 * u, h = 0.6 * u;
+  ctx.beginPath(); ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0); ctx.lineTo(-w * 0.12, h); ctx.stroke(); ctx.restore();
+}
+function mouth(p, u, open, roll, sx) {
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(roll); ctx.scale(sx, 1);
+  ctx.strokeStyle = INK; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  let f = 1; while (f <= MOUTH_BINS.length && open >= MOUTH_BINS[f - 1]) f++;
+  const k = 1.4 / 346 * u; // texture pixels to canvas, from the closed frame's 346 px = 1.4 IOD
+  if (f === 1) {
+    const w = 346 * k, lw = 0.035 * u;
+    ctx.lineWidth = lw; ctx.beginPath(); ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0);
+    ctx.moveTo(-w / 2, -0.07 * u); ctx.lineTo(-w / 2, 0.07 * u); ctx.stroke();
+  } else {
+    const [tw, th] = [[338, 64], [240, 148], [190, 222], [127, 294]][f - 2];
+    const w = tw * k, h = th * k; ctx.lineWidth = 0.05 * u;
+    rrect(-w / 2, -h / 2, w, h, 0.03 * u); ctx.fillStyle = MOUTH_FILL; ctx.fill(); ctx.stroke();
+  }
+  ctx.restore(); return f;
+}
+
+function draw() {
+  ctx.fillStyle = GREY; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!face) { hud.textContent = `no face  ${fps.toFixed(0)} fps`; return; }
+  const m = mapper();
+  let L = m(face.le), R = m(face.re);
+  if (L.x > R.x) [L, R] = [R, L];
+  const dx = R.x - L.x, dy = R.y - L.y, iod2 = Math.hypot(dx, dy);
+  const roll = Math.atan2(dy, dx);
+  const sx = 0.6 + 0.4 * Math.cos(face.yaw);             // squash with the turn, softened
+  const u = iod2 / sx;                                    // size unit: unsquashed eye distance
+  const yawShown = mirror ? -face.yaw : face.yaw;
+  if (yawShown > NOSE_FLIP) noseDir = 1; else if (yawShown < -NOSE_FLIP) noseDir = -1;
+  const mid = { x: (L.x + R.x) / 2, y: (L.y + R.y) / 2 };
+  const leOpen = mirror ? face.re.open : face.le.open, reOpen = mirror ? face.le.open : face.re.open;
+  eye(L, u, leOpen, roll, sx);
+  eye(R, u, reOpen, roll, sx);
+  // Nose: top on the eye line, nudged toward the real nose for the turn.
+  const n = face.nose ? m(face.nose) : mid;
+  nose({ x: mid.x + (n.x - mid.x) * 0.6, y: mid.y + 0.05 * u }, u, roll, sx, noseDir);
+  const f = mouth(m(face.mouth), u, face.mouth.open, roll, sx);
+  hud.textContent = `eyes ${leOpen.toFixed(2)} ${reOpen.toFixed(2)}  mouth ${face.mouth.open.toFixed(2)} (frame ${f})  yaw ${(face.yaw * 57.3).toFixed(0)}°  ${fps.toFixed(0)} fps\nm mirror  h hide`;
+}
+function tick(t) { if (lastT) fps = fps * 0.9 + 100 / Math.max(1, t - lastT); lastT = t; }
+
+// ---- source 1: Silhouette ----
+if (window.silhouette) {
+  msg.remove(); mirror = params.get("mirror") === "1";
+  window.silhouette.on("face", (f) => {
+    tick(performance.now());
+    srcW = 16; srcH = 9;
+    face = f.detected && f.leftEye && f.rightEye && f.mouth ? {
+      le: f.leftEye, re: f.rightEye, nose: f.nose, mouth: f.mouth, yaw: (f.yaw || 0) * Math.PI / 180,
+    } : null;
+    draw();
+  });
+  draw();
+} else {
+  draw();
+  document.getElementById("go").onclick = start;
+}
+
+// ---- source 2: webcam + MediaPipe ----
+async function start() {
+  msg.innerHTML = "<p>Loading face tracker…</p>";
+  try {
+    const { FaceLandmarker, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14");
+    const files = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    const lm = await FaceLandmarker.createFromOptions(files, {
+      baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate: "GPU" },
+      runningMode: "VIDEO", numFaces: 1,
+    });
+    const v = document.getElementById("v");
+    v.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    await v.play();
+    msg.remove();
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const ratio = (t, b, l, r, P) => dist(P[t], P[b]) / Math.max(1e-6, dist(P[l], P[r]));
+    let lastVT = -1;
+    const loop = () => {
+      requestAnimationFrame(loop);
+      if (v.currentTime === lastVT) return; lastVT = v.currentTime;
+      srcW = v.videoWidth; srcH = v.videoHeight;
+      const r = lm.detectForVideo(v, performance.now());
+      tick(performance.now());
+      const P0 = r.faceLandmarks?.[0];
+      if (!P0) { face = null; draw(); return; }
+      // Landmarks are normalised to the frame; scale y so distances are isotropic for ratios.
+      const P = P0.map((p) => ({ x: p.x, y: p.y * srcH / srcW }));
+      const half = (dist(P[234], P[454]) / 2) || 1e-6;
+      const yawR = Math.max(-1, Math.min(1, (P[1].x - (P[234].x + P[454].x) / 2) / half));
+      face = {
+        // Image-left eye is the subject's right eye (468 is the subject's right iris centre).
+        le: { x: P0[468].x, y: P0[468].y, open: ratio(159, 145, 33, 133, P) },
+        re: { x: P0[473].x, y: P0[473].y, open: ratio(386, 374, 362, 263, P) },
+        nose: { x: P0[1].x, y: P0[1].y },
+        mouth: { x: (P0[13].x + P0[14].x) / 2, y: (P0[13].y + P0[14].y) / 2, open: ratio(13, 14, 78, 308, P) },
+        yaw: Math.asin(yawR),
+      };
+      draw();
+    };
+    loop();
+  } catch (e) {
+    msg.innerHTML = `<p>Couldn't start: ${e.message || e}</p>`;
+  }
+}
+</script>
+</body>
+</html>

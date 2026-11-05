@@ -78,3 +78,7 @@ the output.
   transitions, and animation loops; move things only when a face event
   arrives.
 - `Demo/face.html` is the bundled test page and the reference example.
+- [Doodle face](https://arfct.github.io/silhouette/doodle/) is a second
+  example: a grey card with drawn eyes, nose, and mouth that blink, open,
+  and turn with the face. Use it as a Foreground layer so the card covers
+  the person. Opened in a plain browser, it tracks the webcam itself.
