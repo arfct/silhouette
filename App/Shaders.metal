@@ -652,3 +652,32 @@ fragment float4 trackRGB(VSOut in [[stage_in]],
     float cb = cbcr.x - 0.5, cr = cbcr.y - 0.5;
     return float4(saturate(float3(y + 1.5748 * cr, y - 0.1873 * cb - 0.4681 * cr, y + 1.8556 * cb)), 1.0);
 }
+
+// Face puppet: the foreground image drawn through a displaced grid mesh.
+// Positions are image uv (origin top-left) after displacement; uv is where to sample.
+struct PuppetVertex { float2 pos; float2 uv; float depth; float mix; float2 uv2; };
+struct PuppetOut { float4 position [[position]]; float2 uv; float2 uv2; float mix; };
+
+vertex PuppetOut puppetVertex(uint vid [[vertex_id]], const device PuppetVertex *v [[buffer(0)]]) {
+    PuppetOut o;
+    float2 p = v[vid].pos;
+    // Nearer (depth toward 1) draws over farther on a turned head.
+    o.position = float4(p.x * 2 - 1, 1 - p.y * 2, 0.5 - 0.45 * v[vid].depth, 1);
+    o.uv = v[vid].uv;
+    o.uv2 = v[vid].uv2;
+    o.mix = v[vid].mix;
+    return o;
+}
+
+fragment float4 puppetFragment(PuppetOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                               texture2d<float> mask [[texture(1)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 a = src.sample(s, in.uv);
+    // The backdrop (mix -1) draws as is; the mesh only where the subject is,
+    // so the clean plate shows wherever the turned head no longer covers.
+    if (in.mix < -0.5) return a;
+    if (mask.sample(s, in.uv).r < 0.5) discard_fragment();
+    // Mirror fill: blend in the reflected other side where this one is too narrow.
+    if (in.mix <= 0.001) return a;
+    return mix(a, src.sample(s, in.uv2), saturate(in.mix));
+}

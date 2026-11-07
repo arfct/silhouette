@@ -79,6 +79,8 @@ struct Settings: Codable {
     var faceHighRate = false
     var mirrorPreview = true
     var shadowFollowsFace = false
+    /// Animate the face in the foreground image from the camera face.
+    var fgPuppet = false
     /// Recent background URLs and file paths, most recent first, at most ten.
     var recentWebURLs: [String] = []
     /// Security-scoped bookmarks for the file paths in `recentWebURLs`.
@@ -154,6 +156,7 @@ struct Settings: Codable {
         faceHighRate = (try? c.decodeIfPresent(Bool.self, forKey: .faceHighRate)) ?? false
         mirrorPreview = (try? c.decodeIfPresent(Bool.self, forKey: .mirrorPreview)) ?? true
         shadowFollowsFace = (try? c.decodeIfPresent(Bool.self, forKey: .shadowFollowsFace)) ?? false
+        fgPuppet = (try? c.decodeIfPresent(Bool.self, forKey: .fgPuppet)) ?? false
         // Keep only well-formed entries (a host with a dot, or localhost).
         matteSource = (try? c.decodeIfPresent(Renderer.MatteSource.self, forKey: .matteSource)) ?? .chroma
         if matteSource == .system { matteSource = .chroma }   // Apple Chromakey is now a setup dialog over Chromakey
@@ -289,11 +292,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             faceTracker.process(small, camScale: m.scale, camOffset: m.offset)
         }
         renderer.onStats = { [weak self] fps, gpuMs, maskMs in
-            guard let self, windowOpen, !windowOccluded else { return }
+            guard let self else { return }
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["SILHOUETTE_DEMO_PUPPET"] != nil {
+                Logger(subsystem: VirtualCameraConstants.appBundleID, category: "puppet").info("stats fps=\(fps, format: .fixed(precision: 1)) gpu=\(gpuMs, format: .fixed(precision: 2))ms puppetDrive=\(self.renderer.puppet.lastDriveMilliseconds, format: .fixed(precision: 2))ms face=\(self.renderer.puppet.hasFace) yaw=\(self.renderer.puppet.lastPoseDegrees.x, format: .fixed(precision: 1)) pitch=\(self.renderer.puppet.lastPoseDegrees.y, format: .fixed(precision: 1)) roll=\(self.renderer.puppet.lastPoseDegrees.z, format: .fixed(precision: 1)) depthModel=\(self.renderer.puppet.lastDepthMilliseconds, format: .fixed(precision: 0))ms cutoutAndPlate=\(self.renderer.puppet.lastPlateMilliseconds, format: .fixed(precision: 0))ms")
+            }
+            #endif
+            guard windowOpen, !windowOccluded else { return }
             statsLabel.stringValue = maskMs > 0
                 ? String(format: "%.0f fps · GPU %.2f ms · mask %.1f ms", fps, gpuMs, maskMs)
                 : String(format: "%.0f fps · GPU %.2f ms/frame", fps, gpuMs)
         }
+        #if DEBUG
+        // SILHOUETTE_DEMO_PUPPET=1: the bundled sample video as the source, the
+        // bundled public-domain portrait as the foreground, the face puppet on.
+        if ProcessInfo.processInfo.environment["SILHOUETTE_DEMO_PUPPET"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self, let portrait = Bundle.main.url(forResource: "portrait", withExtension: "jpg") else { return }
+                settings.cameraID = Self.sampleSourceID
+                devicesChanged()
+                foreground.setImage(url: portrait)
+                renderer.update { $0.fgMasked = 0; $0.fgBlend = 0 }   // the portrait over the frame, plain
+                controls.puppet = true
+                controls.onPuppet?(true)
+            }
+        }
+        #endif
         renderer.matteSource = settings.matteSource
         controls.matteSource = settings.matteSource.rawValue
         renderer.temperatureAuto = settings.temperatureAuto
@@ -358,11 +382,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             if windowOpen && !windowOccluded { preview.showFace(state) }
             renderer.setFace(state)
+            if windowOpen && !windowOccluded { preview.showPuppet(settings.fgPuppet ? renderer.puppet.overlayPolylines() : nil) }
             background.send(face: state)
             foreground.send(face: state)
             updateShadowDepth(with: state)
         }
         controls.shadowFollowsFace = settings.shadowFollowsFace
+        controls.puppet = settings.fgPuppet
+        renderer.puppet.enabled = settings.fgPuppet
         controls.setRecents(settings.recentWebURLs)
         background.onError = { [weak self] message in self?.controls.status = message }
         foreground.onError = { [weak self] message in self?.controls.status = message }
@@ -889,7 +916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Landmarks are worth their Neural Engine pass only when something shows
     /// them: a web page layer or the preview overlay.
     private func updateTrackingNeeds() {
-        faceTracker.needsLandmarks = background.mode == .web || foreground.mode == .web || settings.faceOverlay
+        faceTracker.needsLandmarks = background.mode == .web || foreground.mode == .web || settings.faceOverlay || settings.fgPuppet
         applyTrackingRate()
     }
 
@@ -1027,6 +1054,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controls.trackFace = settings.trackFace
         controls.faceHighRate = settings.faceHighRate
         controls.shadowFollowsFace = settings.shadowFollowsFace
+        controls.puppet = settings.fgPuppet
+        renderer.puppet.enabled = settings.fgPuppet
         if !settings.shadowFollowsFace { smoothedDepth = 1; renderer.shadowDepthScale = 1 }
         if !settings.trackFace { preview.showFace(nil) }
         restoreLayer(.background)
@@ -1555,6 +1584,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             runAutoKey()
         }
         controls.onMirrorPreview = { [weak self] on in self?.setMirrorPreview(on) }
+        controls.onPuppet = { [weak self] on in
+            guard let self else { return }
+            settings.fgPuppet = on
+            renderer.puppet.enabled = on
+            if on && !settings.trackFace {   // needs the tracker
+                settings.trackFace = true
+                controls.trackFace = true
+                faceTracker.isEnabled = true
+                renderer.trackingEnabled = true
+            }
+            updateTrackingNeeds()
+            settings.save()
+        }
         controls.onShadowFollowsFace = { [weak self] on in
             guard let self else { return }
             settings.shadowFollowsFace = on

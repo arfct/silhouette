@@ -206,6 +206,13 @@ final class BackgroundController: NSObject {
             do {
                 let tex = try loader.newTexture(URL: url, options: textureOptions)
                 setTexture(tex)
+                if slot == .foreground {
+                    if let src = CGImageSourceCreateWithURL(url as CFURL, nil), let image = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+                        renderer.puppet.analyze(image, texture: tex)
+                    } else {
+                        renderer.puppet.clear()
+                    }
+                }
             } catch {
                 DispatchQueue.main.async { self.onError?("Could not load image: \(error.localizedDescription)") }
             }

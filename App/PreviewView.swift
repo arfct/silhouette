@@ -22,6 +22,8 @@ final class PreviewView: NSView {
 
     private let imageLayer = CALayer()
     private let overlay = CAShapeLayer()
+    /// The face puppet's warped landmarks and mesh, in orange.
+    private let puppetOverlay = CAShapeLayer()
     /// Readout with angles, distance, and the pose matrix.
     private let readout = CATextLayer()
     /// Draw the tracking overlay at all. The tracker itself is separate.
@@ -90,6 +92,12 @@ final class PreviewView: NSView {
         overlay.lineJoin = .round
         overlay.isHidden = true
         imageLayer.addSublayer(overlay)
+        puppetOverlay.fillColor = nil
+        puppetOverlay.strokeColor = NSColor.systemOrange.cgColor
+        puppetOverlay.lineWidth = 1
+        puppetOverlay.lineJoin = .round
+        puppetOverlay.isHidden = true
+        imageLayer.addSublayer(puppetOverlay)
         readout.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         readout.fontSize = 10
         readout.foregroundColor = NSColor.white.cgColor
@@ -129,6 +137,23 @@ final class PreviewView: NSView {
         readout.isHidden = true   // the numbers live in the web API; the preview shows only the features
     }
 
+    /// Draw the face puppet's geometry (output coordinates), or hide it with nil.
+    func showPuppet(_ lines: [[SIMD2<Float>]]?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard showFaceOverlay, let lines, !lines.isEmpty else { puppetOverlay.isHidden = true; return }
+        let r = imageRect
+        func pt(_ p: SIMD2<Float>) -> CGPoint { CGPoint(x: r.minX + CGFloat(p.x) * r.width, y: r.minY + (1 - CGFloat(p.y)) * r.height) }
+        let path = CGMutablePath()
+        for l in lines where l.count > 1 {
+            path.move(to: pt(l[0]))
+            for q in l.dropFirst() { path.addLine(to: pt(q)) }
+        }
+        puppetOverlay.path = path
+        puppetOverlay.isHidden = false
+    }
+
     override func layout() {
         super.layout()
         CATransaction.begin()
@@ -137,6 +162,7 @@ final class PreviewView: NSView {
         imageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
         backdropLayer.frame = imageRect
         overlay.frame = imageLayer.bounds
+        puppetOverlay.frame = imageLayer.bounds
         imageLayer.contentsScale = window?.backingScaleFactor ?? 2
         CATransaction.commit()
     }

@@ -261,6 +261,12 @@ final class ControlsView: NSView {
     private let fgMaskButton = OverlayButton(symbol: "person.and.background.dotted", tip: "Mask: confine the foreground layer to your silhouette, so a colour with alpha or a web page lights or tints you rather than covering the frame. Off, the foreground covers everything.")
     private let fgBlendButton = OverlayButton(symbol: "camera.filters", tip: "Blend: how the foreground combines with what is under it, as in an image editor. Normal lays it on top.")
     private var fgBlendValue = 0
+    private let puppetButton = OverlayButton(symbol: "theatermasks", tip: "Animate: move the face in the foreground image with yours. Needs a still image with a face; turns on face tracking. Look straight at the camera with a neutral face when you turn it on.")
+    var onPuppet: ((Bool) -> Void)?
+    var puppet: Bool {
+        get { puppetButton.isOn }
+        set { puppetButton.isOn = newValue }
+    }
     /// Background, Source, and Foreground, shown above the preview rather than in the sidebar.
     private(set) var sourceTile: LayerTile!
     private(set) var backgroundTile: LayerTile!
@@ -373,6 +379,7 @@ final class ControlsView: NSView {
         freezeButton.target = self; freezeButton.action = #selector(freezeTapped)
         fgMaskButton.target = self; fgMaskButton.action = #selector(fgMaskToggled)
         fgBlendButton.target = self; fgBlendButton.action = #selector(fgBlendTapped)
+        puppetButton.target = self; puppetButton.action = #selector(puppetToggled)
         frozen = false
         sourceTile = LayerTile(title: "Source", options: [supersampleButton])
         // Mirror and Pause act on the preview, so they sit on it rather than on the Source tile.
@@ -380,7 +387,7 @@ final class ControlsView: NSView {
         previewButtons.spacing = 6
         previewButtons.translatesAutoresizingMaskIntoConstraints = false
         backgroundTile = LayerTile(title: "Background", options: [])
-        foregroundTile = LayerTile(title: "Foreground", options: [fgMaskButton, fgBlendButton])
+        foregroundTile = LayerTile(title: "Foreground", options: [fgMaskButton, fgBlendButton, puppetButton])
         sourceTile.onPick = { [weak self] in self?.showSourcePicker() }
         backgroundTile.onPick = { [weak self] in self?.showLayerPicker(.background) }
         foregroundTile.onPick = { [weak self] in self?.showLayerPicker(.foreground) }
@@ -1124,6 +1131,7 @@ final class ControlsView: NSView {
         refreshEnabledStates()
         onParam?(\.keyEnabled, keySwitch.state == .on ? 1 : 0)
     }
+    @objc private func puppetToggled() { puppetButton.isOn.toggle(); onPuppet?(puppetButton.isOn) }
     @objc private func fgMaskToggled() { fgMaskButton.isOn.toggle(); onParam?(\.fgMasked, fgMaskButton.isOn ? 1 : 0) }
 
     /// The blend modes as a menu under the button, the current one checked.

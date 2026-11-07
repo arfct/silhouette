@@ -145,6 +145,8 @@ final class Renderer {
         set { lock.lock(); matte = newValue; lock.unlock() }
     }
     private lazy var personMatter = PersonMatter(device: device)
+    /// Animates the face in the foreground image from the camera face.
+    private(set) lazy var puppet = FacePuppet(device: device, library: device.makeDefaultLibrary())
     private var statMaskTime: Double = 0
     /// Guided-filter upsample of the person mask, at half the camera resolution.
     private var guidedPrepPipeline: MTLComputePipelineState!
@@ -548,7 +550,7 @@ final class Renderer {
         if mirrorSource { camScale.x = -camScale.x; camOffset.x = 1 - camOffset.x }
         var p = params
         let bg = background
-        let fg = foreground
+        var fg = foreground
         let depth = depthScale
         let previousCamera = lastCameraBuffer
         lastCameraBuffer = camera
@@ -563,6 +565,13 @@ final class Renderer {
             p.light0 = lights[0]; p.light0Color = lights[1]; p.light1 = lights[2]; p.light1Color = lights[3]
         }
         lock.unlock()
+
+        // Face puppet: the warped foreground replaces the layer for this frame.
+        // Its own command buffer on the same queue, so it finishes before the composite reads it.
+        if let source = fg, let pre = commandQueue.makeCommandBuffer(), let warped = puppet.encode(pre, source: source) {
+            pre.commit()
+            fg = warped
+        }
 
         p.camScale = camScale
         p.camOffset = camOffset
@@ -855,6 +864,7 @@ final class Renderer {
     /// larger than the face box, so it covers hair and ears, and the direction
     /// the face points. Eased so detection jitter does not flicker the light.
     func setFace(_ state: FaceState) {
+        puppet.drive(state)
         lock.lock(); defer { lock.unlock() }
         guard state.detected, let box = state.box, let c = state.center, let pose = state.pose, pose.count == 16 else {
             faceTime = 0; return

@@ -4,3 +4,6 @@ xcuserdata/
 .DS_Store
 dist/*.zip
 Design/app-screenshot.png
+
+# Fetched by scripts/fetch-depth-model.sh
+App/Models/*.mlpackage
