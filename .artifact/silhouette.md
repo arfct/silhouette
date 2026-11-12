@@ -1,6 +1,7 @@
 ---
 title: Silhouette
 date: 2026-10
+status: beta
 category: product
 tags: [macos]
 url: https://arfct.github.io/silhouette/
@@ -14,7 +15,7 @@ media:
   - src: sample-video.jpg
     caption: A frame of the sample video bundled with the app, a green-screen clip that the Source menu offers in place of a camera
     alt: A person with blonde hair tied up, in a cream leather jacket over a black top, facing the camera in front of an evenly lit green backdrop
-unconfirmed: [date]
+unconfirmed: [date, status]
 ---
 
 Silhouette appears to FaceTime, Zoom, Google Meet and Microsoft Teams as one more camera, and what it sends them is the Mac's camera image with a green or blue backdrop removed. The keying is done on the GPU by a single Metal shader. It works on the image in the YCbCr form the camera delivers, with no color conversion beforehand. When a source is first chosen, the key color is taken from the dominant color around the edge of the frame, skipping the face and the body under it.
